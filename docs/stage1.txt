@@ -1,0 +1,35 @@
+과제 1-2: FBP 엔진에 필요한 핵심 클래스 목록을 작성하라.
+            클래스 이름, 소속 패키지, 역할(한 줄)을 표로 정리하라.
+
+----------core 패키지-----------
+Node               - interface      - 모든 노드의 기본계약(getId(), process(), initialize(), shutdown() 정의)
+AbstractNode       - AbstractClass  - Node의 공통구현(id 관리, 포트 맵 관리, TemplateMethod 패턴으로 OnProcess() 위임)
+InputPort          - interface      - 노드의 입력 지점(getName(), receive() 정의)
+OutPutPort         - interface      - 노드의 출력 지점(getName(), connection(), send() 정의)
+DefaultInputPort   - class          - InputPort 구현(receive() 호출 시 소속 노드의 pocess()실행)
+DefaultOutputPort  - class          - OutputPort 구현(연결된 모든 Connection에 deliver() 호출(1:N))
+Connection         - class          - 두 포트를 잇는 메시지 버퍼 채널(내부에 LinkedBlockingQueue<Message> 보유)
+Flow               - class          - 노드와 Connection을 하나의 단위로 묶어 관리(연결정의, 유효성 검증, 일괄 초기화/종료)
+
+-----------message 패키지-----------
+Message  - class  - 노드간 이동하는 데이터 단위(UUID, 페이로드(Map<String, Object), 타임스탬프 보유, 불멸(Immutable)설계)
+
+-----------node 패키지-----------
+PrintNode             - class       - 수신 메시지를 콘솔에 출력하는 종단 노드
+GeneratorNode         - class       - 지정한 key-value로 Message를 생성하여 OutputPort로 전송
+FilterNode            - class       - 특정 필드 값이 임계값 이상이면 통과, 미만이면 차단
+TimerNode             - class       - 지정한 주기마다 tick 메시지를 자동 생성(ScheduledExecutorService 활용)
+LogNode               - class       - 타임 스팸트와 함께 콘솔 출력 후 메시지를 다음 노드로 그대로 전달(중간 삽입용)
+TransformNode         - class       - Function<Message, Message> 람다로 메시지를 변환하여 전달
+SplitNode             - class       - 조건에 따라 match/mismatch 두 포트로 분기
+CounterNode           - class       - 수신 메시지 수를 누적하여 count 키를 추가한 새 메시지 전달
+DelayNode             - class       - 지정한 시간만큼 대기 후 메시지를 그대로 전달
+TemperatureSensorNode - class       - 지정 범위의 랜덤 온도 데이터를 생성하는 IoT 센서 시뮬레이터
+HumidityFilterNode    - class       - 지정 범위의 랜덤 습도 데이터를 생성하는 IoT 센서 시뮬레이터
+ThresholdFilterNode   - class       - 임계값 초과 시 alert, 이하 시 normal 포트로 분기
+AlertNode             - class       - sensorId와 온도를 꺼내 경고 메시지를 출력하는 종단 노드
+MergeNode             - class       - 두 InputPort(in-1, in-2)의 메시지를 합쳐 하나의 메시지로 출력
+CollectorNode         - class       - 수신 메시지를 List<Message>에 수집(테스트 검증용)
+
+-----------runner 패키지-----------
+Main                  - class

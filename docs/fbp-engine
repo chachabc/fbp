@@ -1,0 +1,14 @@
+[Input] -> [Port O1] --M-- [Port O2]
+                           [Process A]
+
+                                |
+                          [Connection 1]
+                                |
+                           [Process B]
+                          /           \
+               [Connection 2]       [Connection 3]
+                     /                     \
+               [Process C]             [Process D]
+
+                    |                       |
+               [Port O3] --N-- [Port O4] -> [Output]
