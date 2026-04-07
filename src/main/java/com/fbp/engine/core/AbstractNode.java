@@ -26,11 +26,11 @@ public abstract class AbstractNode implements Node{
     }
 
     // Port Selection
-    public InputPort getInputPorts(String name){
+    public InputPort getInputPort(String name){
         return inputPorts.get(name);
     }
 
-    public OutputPort getOutputPorts(String name){
+    public OutputPort getOutputPort(String name){
         return outputPorts.get(name);
     }
 

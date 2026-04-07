@@ -66,12 +66,12 @@ public class Main {
         PrintNode printNode = new PrintNode("printer-1");
 
         Connection connection1 = new Connection("timer-filter-connect");
-        connection1.setTarget(filterNode.getInputPorts("in"));
-        timerNode.getOutputPorts("out").connect(connection1);
+        connection1.setTarget(filterNode.getInputPort("in"));
+        timerNode.getOutputPort("out").connect(connection1);
 
         Connection connection2 = new Connection("filter-printer-connect");
-        connection2.setTarget(printNode.getInputPorts("in"));
-        filterNode.getOutputPorts("out").connect(connection2);
+        connection2.setTarget(printNode.getInputPort("in"));
+        filterNode.getOutputPort("out").connect(connection2);
 
         timerNode.initialize();
         filterNode.initialize();

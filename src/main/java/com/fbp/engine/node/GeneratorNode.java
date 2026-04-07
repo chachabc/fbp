@@ -1,9 +1,6 @@
 package com.fbp.engine.node;
 
 import com.fbp.engine.core.AbstractNode;
-import com.fbp.engine.core.DefaultOutputPort;
-import com.fbp.engine.core.Node;
-import com.fbp.engine.core.OutputPort;
 import com.fbp.engine.message.Message;
 
 import java.util.Map;

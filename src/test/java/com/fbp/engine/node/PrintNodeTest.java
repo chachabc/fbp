@@ -36,7 +36,7 @@ class PrintNodeTest {
     @DisplayName("InputPort 조회")
     void test4(){
         PrintNode node = new PrintNode("printer-1");
-        Assertions.assertNotNull(node.getInputPort());
+        Assertions.assertNotNull(node.getInputPort("in"));
     }
 
     @Test
@@ -45,6 +45,6 @@ class PrintNodeTest {
         PrintNode node = new PrintNode("printer-1");
         Message message = new Message(Map.of("temperature", 25.5));
 
-        Assertions.assertDoesNotThrow(() -> node.getInputPort().receive(message));
+        Assertions.assertDoesNotThrow(() -> node.getInputPort("in").receive(message));
     }
 }

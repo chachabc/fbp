@@ -32,7 +32,7 @@ class GeneratorNodeTest {
                 received.add(message);
             }
         });
-        generatorNode.getOutputPort().connect(connection);
+        generatorNode.getOutputPort("out").connect(connection);
     }
 
     @Test
@@ -52,7 +52,7 @@ class GeneratorNodeTest {
     @Test
     @DisplayName("OutputPort 조회")
     void test3(){
-        Assertions.assertNotNull(generatorNode.getOutputPort());
+        Assertions.assertNotNull(generatorNode.getOutputPort("out"));
     }
 
     @Test

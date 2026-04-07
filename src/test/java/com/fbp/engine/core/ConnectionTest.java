@@ -13,6 +13,13 @@ import java.util.Map;
 class ConnectionTest {
     private Connection connection;
 
+    private InputPort collectingPort(List<Message> bucket) {
+        return new InputPort() {
+            @Override public String getName() { return "in"; }
+            @Override public void receive(Message message) { bucket.add(message); }
+        };
+    }
+
     @BeforeEach
     void setUp(){
         connection = new Connection("test-connect");
@@ -22,26 +29,13 @@ class ConnectionTest {
     @DisplayName("deliver 후 target 수신")
     void test1(){
         List<Message> received = new ArrayList<>();
+        connection.setTarget(collectingPort(received));
 
-        InputPort inputPort = new InputPort() {
-            @Override
-            public String getName() {
-                return "in";
-            }
-
-            @Override
-            public void receive(Message message) {
-                received.add(message);
-            }
-        };
-
-        connection.setTarget(inputPort);
-
-        Message message = new Message(Map.of("temperature", 25.5));
-        connection.deliver(message);
+        Message msg = new Message(Map.of("temperature", 25.5));
+        connection.deliver(msg);
 
         Assertions.assertEquals(1, received.size());
-        Assertions.assertEquals(25.5, received.getFirst().get("temperature"));
+        Assertions.assertEquals(25.5, received.get(0).get("temperature"));
     }
 
     @Test
@@ -54,12 +48,8 @@ class ConnectionTest {
     @Test
     @DisplayName("버퍼 크기 확인")
     void test3(){
-        Message message = new Message(Map.of("temperature", 25.5));
-        Message message1 = new Message(Map.of("temperature1", 25.5));
-
-        connection.deliver(message);
-        connection.deliver(message1);
-
+        connection.deliver(new Message(Map.of("key", "value1")));
+        connection.deliver(new Message(Map.of("key", "value2")));
         Assertions.assertEquals(2, connection.getBufferSize());
     }
 
@@ -67,33 +57,15 @@ class ConnectionTest {
     @DisplayName("다수 메시지 순서 보장")
     void test4(){
         List<Message> received = new ArrayList<>();
+        connection.setTarget(collectingPort(received));
 
-        InputPort inputPort = new InputPort() {
-            @Override
-            public String getName() {
-                return "in";
-            }
-
-            @Override
-            public void receive(Message message) {
-                received.add(message);
-            }
-        };
-
-        connection.setTarget(inputPort);
-
-        Message message1 = new Message(Map.of("key", 1));
-        Message message2 = new Message(Map.of("key", 2));
-        Message message3 = new Message(Map.of("key", 3));
-
-        connection.deliver(message1);
-        connection.deliver(message2);
-        connection.deliver(message3);
-
+        connection.deliver(new Message(Map.of("key", 1)));
+        connection.deliver(new Message(Map.of("key", 2)));
+        connection.deliver(new Message(Map.of("key", 3)));
 
         Assertions.assertEquals(3, received.size());
         Assertions.assertEquals(1, (int) received.get(0).get("key"));
-        Assertions.assertEquals(2, (int) received.get(0).get("key"));
+        Assertions.assertEquals(2, (int) received.get(1).get("key"));
         Assertions.assertEquals(3, (int) received.get(2).get("key"));
     }
 }

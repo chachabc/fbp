@@ -33,7 +33,7 @@ class FilterNodeTest {
                 received.add(message);
             }
         });
-        filterNode.getOutputPort().connect(connection);
+        filterNode.getOutputPort("out").connect(connection);
     }
 
     @Test

@@ -26,6 +26,12 @@ class DefaultInputPortTest {
             public void process(Message message) {
                 processed.add(message);
             }
+
+            @Override
+            public void initialize(){}
+
+            @Override
+            public void shutdown(){}
         };
 
         DefaultInputPort inputPort = new DefaultInputPort("in", node);
@@ -49,6 +55,12 @@ class DefaultInputPortTest {
             @Override
             public void process(Message message) {
             }
+
+            @Override
+            public void initialize(){}
+
+            @Override
+            public void shutdown(){}
         };
         DefaultInputPort inputPort = new DefaultInputPort("trigger", node);
         Assertions.assertEquals("trigger", inputPort.getName());
