@@ -1,9 +1,9 @@
-package com.fbp.engine.runner.threadpractice;
+package com.fbp.engine.runner.thread;
 
 import java.util.ArrayList;
 
 //단계 A — synchronized + wait() / notify()
-public class Step4SynchronizedPractice {
+public class SynchronizedPractice {
     public static void main(String[] args) throws InterruptedException {
         ArrayList<String> buffer = new ArrayList<>();
         final String END = "END";

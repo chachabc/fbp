@@ -46,7 +46,7 @@ class GeneratorNodeTest {
     @DisplayName("메시지 내용 확인")
     void test2(){
         generatorNode.generate("temperature", 25.5);
-        Assertions.assertEquals(25.5, (double) received.get(0).get("temperature"));
+        Assertions.assertEquals(25.5, (double) received.getFirst().get("temperature"));
     }
 
     @Test

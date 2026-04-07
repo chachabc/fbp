@@ -9,3 +9,9 @@
 /Users/chosun-nhn34/Desktop/level_up/fbp-engine/src/main/java/com/fbp/engine/node/GeneratorNode.java
 /Users/chosun-nhn34/Desktop/level_up/fbp-engine/src/main/java/com/fbp/engine/node/PrintNode.java
 /Users/chosun-nhn34/Desktop/level_up/fbp-engine/src/main/java/com/fbp/engine/runner/Main.java
+/Users/chosun-nhn34/Desktop/level_up/fbp-engine/src/main/java/com/fbp/engine/runner/thread/BasicThreadPractice.java
+/Users/chosun-nhn34/Desktop/level_up/fbp-engine/src/main/java/com/fbp/engine/runner/thread/BlockingQueuePractice.java
+/Users/chosun-nhn34/Desktop/level_up/fbp-engine/src/main/java/com/fbp/engine/runner/thread/PipelinePractice.java
+/Users/chosun-nhn34/Desktop/level_up/fbp-engine/src/main/java/com/fbp/engine/runner/thread/SpeedPractice.java
+/Users/chosun-nhn34/Desktop/level_up/fbp-engine/src/main/java/com/fbp/engine/runner/thread/SynchronizedPractice.java
+/Users/chosun-nhn34/Desktop/level_up/fbp-engine/src/main/java/com/fbp/engine/runner/thread/ThreadPractice.java

@@ -5,11 +5,12 @@ import com.fbp.engine.message.Message;
 import com.fbp.engine.node.FilterNode;
 import com.fbp.engine.node.GeneratorNode;
 import com.fbp.engine.node.PrintNode;
+import com.fbp.engine.node.TimerNode;
 
 import java.util.Map;
 
 public class Main {
-    public static void main(String[] args){
+    public static void main(String[] args) throws InterruptedException{
         //step2-5
         /*
         Message message = new Message(Map.of("temperature", 25.5, "location", "server-room"));
@@ -42,6 +43,7 @@ public class Main {
          */
 
         //step3-10
+        /*
         GeneratorNode generatorNode = new GeneratorNode("generator-1");
         FilterNode filterNode = new FilterNode("filter-1", "temperature", 30.0);
         PrintNode printNode = new PrintNode("printer-1");
@@ -56,5 +58,28 @@ public class Main {
 
         generatorNode.generate("temperature", 25.0);
         generatorNode.generate("temperature", 35.0);
+         */
+
+        //step5-6
+        TimerNode timerNode = new TimerNode("timer-1", 500);
+        FilterNode filterNode = new FilterNode("filter-1", "tick", 3.0);
+        PrintNode printNode = new PrintNode("printer-1");
+
+        Connection connection1 = new Connection("timer-filter-connect");
+        connection1.setTarget(filterNode.getInputPorts("in"));
+        timerNode.getOutputPorts("out").connect(connection1);
+
+        Connection connection2 = new Connection("filter-printer-connect");
+        connection2.setTarget(printNode.getInputPorts("in"));
+        filterNode.getOutputPorts("out").connect(connection2);
+
+        timerNode.initialize();
+        filterNode.initialize();
+        printNode.initialize();
+
+        Thread.sleep(3000);
+        timerNode.shutdown();
+        filterNode.shutdown();
+        printNode.shutdown();
     }
 }

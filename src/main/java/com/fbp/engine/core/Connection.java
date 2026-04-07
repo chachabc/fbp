@@ -2,17 +2,20 @@ package com.fbp.engine.core;
 
 import com.fbp.engine.message.Message;
 
-import java.util.LinkedList;
-import java.util.Queue;
+import java.util.concurrent.LinkedBlockingQueue;
 
 public class Connection {
     private final String id;
-    private final Queue<Message> buffer;
+    private final LinkedBlockingQueue<Message> buffer;
     private InputPort target;
 
     public Connection(String id){
+        this(id, 100);
+    }
+
+    public Connection(String id, int capacity){
         this.id = id;
-        this.buffer = new LinkedList<>();
+        this.buffer = new LinkedBlockingQueue<>(capacity);
     }
 
     public void setTarget(InputPort target){
@@ -20,9 +23,19 @@ public class Connection {
     }
 
     public void deliver(Message message){
-        buffer.offer(message);
-        if(target != null){
-            target.receive(buffer.poll());
+        try {
+            buffer.put(message);
+        } catch (InterruptedException e){
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    public Message poll(){
+        try{
+            return buffer.take();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return null;
         }
     }
 

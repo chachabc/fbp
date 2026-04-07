@@ -1,0 +1,62 @@
+관찰할 문제들:
+
+=====문제 1: ConcurrentModificationException 또는 IndexOutOfBoundsException이 발생하는가?=====
+발생 원인:
+ - ArrayList는 내부적으로 배열 기반이라 동시 접근을 전혀 고려하지 않는다.
+
+ - add()와 remove(0)이 동시에 실행되면 다음과 같은 상황이 발생한다.
+   생산자: size 확인 -> 배열 복사 - size 증가 (3단계)
+   소비자: size 확인 -> 0번 인덱스 제거       (2단계)
+
+시나리오:
+ 1. 소비자가 isEmpty() -> false 확인
+ 2. 생산자가 remove()로 마지막 요소 삭제
+ 3. 소비자가 remove(0) 시도 -> 이미 비어있음 -> indexOutOfBoundsException()
+
+
+=====문제 2: 소비자가 같은 메시지를 두 번 꺼내거나, 메시지가 유실되는 경우가 있는가?=====
+발생 원인:
+ - isEmpty() 체크와 remove(0) 사이가 원자적이지 않아서 두 스레드가 동시에 같은 인덱스를 바라볼 수 있다.
+
+시나리오 (중복 수신):
+ 1. 소비자A: isEmpty() -> false
+ 2. 소비자B: isEmpty() -> false  <- 같은 타이밍
+ 3. 소비자A: remove(0) -> "메시지-0" 꺼냄
+ 4. 소비자B: remove(0) -> "메시지-1" 꺼냄 (메시지-0) 유실
+
+시나리오 (유실):
+ 1. 생산자가 add() 도중 내부 배열 재할당(resize) 발행
+ 2. 소비자가 동시에 remove() -> 잘못된 배열 상태 참조 -> 데이터 손실
+
+=====문제 3: 소비자의 while(!buffer.isEmpty()) 루프가 CPU를 100% 점유하는가? (busy-waiting)=====
+발생 원인:
+ - 소비자 루프가 아무런 대기 없이 계속 조건을 검사한다.
+ while (count < 100)
+    if(!buffer.isEmpty()){
+        buffer.remove(0);
+    }
+ } // 버퍼가 비어 있는 동안에도 루프가 멈추지 않고 계속 돌아서 CPU 코어 하나를 100% 점유한다.
+
+=====문제 4: 생산자가 끝난 뒤, 소비자가 종료 시점을 어떻게 알 수 있는가?=====
+발생 원인:
+ - 생산자가 끝났다는 사실을 소비자에게 전달하는 수단이 없다.
+
+시나리오:
+ 1. 생산자: 100개 생성 후 루프 종료 -> 소비자에게 알리는 방법 없음
+ 2. 소비자: count < 100 조건으로 종료 시도 -> 유실된 메시지가 있으면 count가 100에 도달 못함
+                                     -> 소비자가 무한 루프에 빠짐
+
+==========결론==========
+핵심 코드 라인 수: synchronized(~25줄) > BlockingQueue(~15줄) > ArrayList(~10줄)
+예외 위험: ArrayList(ConcurrentModificationException) > synchronized(X) > BlockingQueue(X)
+CPU 사용률: ArrayList(100%, busy-waiting) > synchronized(낮음, wait) > BlockingQueue(낮음, take)
+종료 처리: ArrayList(어려움) > synchronized(END 신호 필요) > BlockingQueue(END 신호 필요)
+스레드 안전: ArrayList(X) > synchronized(V, 수동) > BlockingQueue(V, 자동)
+
+정리:
+ArrayList     → 동시성 문제를 전혀 처리 못함. 사용 불가
+
+synchronized  → 직접 제어 가능하지만 실수 여지가 많고 코드가 복잡
+
+BlockingQueue → 동시성을 내부에서 처리해주므로 가장 단순하고 안전
+               → FBP Connection의 버퍼로 최적의 선택

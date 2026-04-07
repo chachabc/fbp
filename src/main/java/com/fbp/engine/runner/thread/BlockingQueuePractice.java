@@ -1,10 +1,10 @@
-package com.fbp.engine.runner.threadpractice;
+package com.fbp.engine.runner.thread;
 
 import java.util.concurrent.BlockingDeque;
 import java.util.concurrent.LinkedBlockingDeque;
 
 //단계 B — BlockingQueue 대체
-public class Step4BlockingQueuePractice {
+public class BlockingQueuePractice {
     public static void main(String[] args) throws InterruptedException{
         BlockingDeque<String> buffer = new LinkedBlockingDeque<>(200);
         final String END = "END";

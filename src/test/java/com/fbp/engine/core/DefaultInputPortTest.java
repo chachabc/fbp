@@ -34,7 +34,7 @@ class DefaultInputPortTest {
         inputPort.receive(message);
 
         Assertions.assertEquals(1, processed.size());
-        Assertions.assertEquals(25.5, (double) processed.get(0).get("temperature"));
+        Assertions.assertEquals(25.5, (double) processed.getFirst().get("temperature"));
     }
 
     @Test

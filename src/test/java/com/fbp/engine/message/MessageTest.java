@@ -39,7 +39,7 @@ class MessageTest {
     @Test
     @DisplayName("제네릭 get 타입 캐스팅")
     void generic(){
-        Assertions.assertTrue(message.get("temperature") instanceof Double);
+        Assertions.assertInstanceOf(Double.class, message.get("temperature"));
     }
 
     @Test

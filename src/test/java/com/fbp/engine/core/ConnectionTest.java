@@ -41,7 +41,7 @@ class ConnectionTest {
         connection.deliver(message);
 
         Assertions.assertEquals(1, received.size());
-        Assertions.assertEquals(25.5, received.get(0).get("temperature"));
+        Assertions.assertEquals(25.5, received.getFirst().get("temperature"));
     }
 
     @Test

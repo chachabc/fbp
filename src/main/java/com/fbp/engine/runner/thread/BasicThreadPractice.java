@@ -1,4 +1,4 @@
-package com.fbp.engine.runner.threadpractice;
+package com.fbp.engine.runner.thread;
 
 import java.util.ArrayList;
 
@@ -8,7 +8,7 @@ import java.util.ArrayList;
 //문제 4: 생산자 종료 후 소비자가 종료 시점을 알 수 없음
 
 //과제 4-1: ArrayList 공유 버퍼 문제 확인
-public class Step4Practice {
+public class BasicThreadPractice {
     public static void main(String[] args) throws InterruptedException {
         ArrayList<String> buffer = new ArrayList<>();
 

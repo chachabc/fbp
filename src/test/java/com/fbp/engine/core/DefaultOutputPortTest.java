@@ -45,7 +45,7 @@ class DefaultOutputPortTest {
         outputPort.send(message);
 
         Assertions.assertEquals(1, received.size());
-        Assertions.assertEquals(25.5, (double) received.get(0).get("temperature"));
+        Assertions.assertEquals(25.5, (double) received.getFirst().get("temperature"));
     }
 
     @Test
@@ -67,8 +67,8 @@ class DefaultOutputPortTest {
 
         Assertions.assertEquals(1, received1.size());
         Assertions.assertEquals(1, received2.size());
-        Assertions.assertEquals(25.5, (double) received1.get(0).get("temperature"));
-        Assertions.assertEquals(25.5, (double) received2.get(0).get("temperature"));
+        Assertions.assertEquals(25.5, (double) received1.getFirst().get("temperature"));
+        Assertions.assertEquals(25.5, (double) received2.getFirst().get("temperature"));
     }
 
     @Test

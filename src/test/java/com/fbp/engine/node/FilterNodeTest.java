@@ -43,7 +43,7 @@ class FilterNodeTest {
         filterNode.process(message);
 
         Assertions.assertEquals(1, received.size());
-        Assertions.assertEquals(35.0, (double) received.get(0).get("temperature"));
+        Assertions.assertEquals(35.0, (double) received.getFirst().get("temperature"));
     }
 
     @Test
