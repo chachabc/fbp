@@ -25,6 +25,9 @@ public class Connection {
     public void deliver(Message message){
         try {
             buffer.put(message);
+            if (target != null) {
+                target.receive(buffer.take());  // step4에서는 분리
+            }
         } catch (InterruptedException e){
             Thread.currentThread().interrupt();
         }

@@ -10,7 +10,7 @@ public class PrintNode extends AbstractNode {
 
     public PrintNode(String id){
         super(id);
-        addInputPorts("in");
+        addInputPort("in");
     }
 
     @Override

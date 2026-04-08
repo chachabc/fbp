@@ -18,7 +18,7 @@ public class TimerNode extends AbstractNode {
         super(id);
         this.intervalMs = intervalMs;
         this.tickCount = 0;
-        addOutputPorts("out");
+        addOutputPort("out");
     }
 
     @Override
@@ -32,7 +32,7 @@ public class TimerNode extends AbstractNode {
             ));
             send("out", message);
             tickCount++;
-        }, 0, intervalMs, TimeUnit.MICROSECONDS);
+        }, 0, intervalMs, TimeUnit.MILLISECONDS);
     }
 
     @Override

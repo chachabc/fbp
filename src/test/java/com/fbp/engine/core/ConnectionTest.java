@@ -31,11 +31,11 @@ class ConnectionTest {
         List<Message> received = new ArrayList<>();
         connection.setTarget(collectingPort(received));
 
-        Message msg = new Message(Map.of("temperature", 25.5));
-        connection.deliver(msg);
+        Message message = new Message(Map.of("temperature", 25.5));
+        connection.deliver(message);
 
         Assertions.assertEquals(1, received.size());
-        Assertions.assertEquals(25.5, received.get(0).get("temperature"));
+        Assertions.assertEquals(25.5, received.getFirst().get("temperature"));
     }
 
     @Test

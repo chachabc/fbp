@@ -17,11 +17,11 @@ public abstract class AbstractNode implements Node{
     }
 
     //Port Register
-    protected void addInputPorts(String name){
+    protected void addInputPort(String name){
         inputPorts.put(name, new DefaultInputPort(name, this));
     }
 
-    protected void addOutputPorts(String name){
+    protected void addOutputPort(String name){
         outputPorts.put(name, new DefaultOutputPort(name));
     }
 

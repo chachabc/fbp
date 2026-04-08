@@ -12,8 +12,8 @@ public class FilterNode extends AbstractNode{
         super(id);
         this.key = key;
         this.threshold = threshold;
-        addInputPorts("in");
-        addOutputPorts("out");
+        addInputPort("in");
+        addOutputPort("out");
     }
 
     @Override

@@ -9,7 +9,7 @@ public class GeneratorNode extends AbstractNode {
 
     public GeneratorNode(String id){
         super(id);
-        addOutputPorts("out");
+        addOutputPort("out");
     }
 
     @Override
