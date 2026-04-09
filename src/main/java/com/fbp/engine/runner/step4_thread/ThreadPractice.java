@@ -1,4 +1,4 @@
-package com.fbp.engine.runner.thread;
+package com.fbp.engine.runner.step4_thread;
 
 import com.fbp.engine.core.Connection;
 import com.fbp.engine.message.Message;
@@ -15,13 +15,13 @@ public class ThreadPractice {
         Connection connection = new Connection("connect-1");
 
         //producer - 5 messages for 1 sec
-        Thread producerThread  = new Thread(() -> {
+        java.lang.Thread producerThread  = new java.lang.Thread(() -> {
             for (int i = 0; i < 5; i++){
                 generatorNode.generate("index", i);
                 connection.deliver(new Message(Map.of("index", i)));
                 System.out.println("[producer] message " + i);
                 try{
-                    Thread.sleep(1000);
+                    java.lang.Thread.sleep(1000);
                 } catch (InterruptedException e) {
                     break;
                 }
@@ -30,7 +30,7 @@ public class ThreadPractice {
         });
 
         //consumer
-        Thread consumerThread = new Thread(() -> {
+        java.lang.Thread consumerThread = new java.lang.Thread(() -> {
             for (int i = 0; i < 5; i++){
                 Message message = connection.poll();
                 if (message != null){

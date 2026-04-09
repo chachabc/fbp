@@ -3,6 +3,8 @@ package com.fbp.engine.node;
 import com.fbp.engine.core.AbstractNode;
 import com.fbp.engine.message.Message;
 
+import java.time.LocalTime;
+import java.time.format.DateTimeFormatter;
 import java.util.Map;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -26,9 +28,10 @@ public class TimerNode extends AbstractNode {
         super.initialize();
         scheduler = Executors.newSingleThreadScheduledExecutor();
         scheduler.scheduleAtFixedRate(() -> {
+            String time = LocalTime.now().format(DateTimeFormatter.ofPattern("HH:mm:ss.SS"));
             Message message = new Message(Map.of(
                     "tick", tickCount,
-                    "timestamp", System.currentTimeMillis()
+                    "timestamp", time
             ));
             send("out", message);
             tickCount++;
