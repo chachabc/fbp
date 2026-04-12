@@ -7,12 +7,17 @@ public class Flow {
     private final Map<String, AbstractNode> nodes;
     private final List<Connection> connections;
     private final Map<String, List<String>> graph = new HashMap<>();
-    private enum NodeState {UNVISITED, VISITING,VISITED}
+    private enum nodeState {UNVISITED, VISITING,VISITED}
+
+    public enum FlowState {RUNNING, STOPPED}
+
+    private FlowState flowState;
 
     public Flow(String id){
         this.id = id;
         this.nodes = new HashMap<>();
         this.connections = new ArrayList<>();
+        this.flowState = FlowState.STOPPED;
     }
 
     public Flow addNode(AbstractNode node){
@@ -48,10 +53,12 @@ public class Flow {
 
     public void initialize(){
         nodes.values().forEach(AbstractNode::initialize);
+        this.flowState = FlowState.RUNNING;
     }
 
     public void shutdown(){
         nodes.values().forEach(AbstractNode::shutdown);
+        this.flowState = FlowState.STOPPED;
     }
 
     public List<String> validate(){
@@ -61,11 +68,11 @@ public class Flow {
             return errors;
         }
 
-        Map<String, NodeState> state = new HashMap<>();
-        nodes.keySet().forEach(id -> state.put(id, NodeState.UNVISITED));
+        Map<String, nodeState> state = new HashMap<>();
+        nodes.keySet().forEach(id -> state.put(id, nodeState.UNVISITED));
 
         for (String nodeId : nodes.keySet()){
-            if (state.get(nodeId) == NodeState.UNVISITED){
+            if (state.get(nodeId) == nodeState.UNVISITED){
                 if (hasCycle(nodeId, graph, state)){
                     errors.add("순환 참조가 감지되었습니다.");
                     break;
@@ -76,20 +83,21 @@ public class Flow {
     }
 
     private boolean hasCycle(String nodeId, Map<String, List<String>> graph,
-                             Map<String, NodeState> state){
-        state.put(nodeId, NodeState.VISITING);
+                             Map<String, nodeState> state){
+        state.put(nodeId, nodeState.VISITING);
 
         for (String next : graph.get(nodeId)){
-            if (state.get(next) == NodeState.VISITING) return true;
-            if (state.get(next) == NodeState.UNVISITED) {
+            if (state.get(next) == nodeState.VISITING) return true;
+            if (state.get(next) == nodeState.UNVISITED) {
                 if (hasCycle(next, graph, state)) return true;
             }
         }
-        state.put(nodeId, NodeState.VISITED);
+        state.put(nodeId, nodeState.VISITED);
         return false;
     }
 
     public String getId(){return id;}
     public Map<String, AbstractNode> getNodes(){return nodes;}
     public List<Connection> getConnections(){return connections;}
+    public FlowState getFlowState(){return flowState;}
 }

@@ -48,7 +48,7 @@ public class FlowEngine {
 
     public void listFlows(){
         flows.forEach((id, flow) ->
-                System.out.println("[" + id + "]" + state));
+                System.out.println("[" + id + "]" + flow.getFlowState()));
     }
 
     public State getState(){return state;}

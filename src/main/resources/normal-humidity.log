@@ -1,0 +1,5 @@
+Message{id='ebd96ff6-41ee-4b10-900f-97237f3793d9', payload={humidity=66.8, unit=%, timestamp=1775810967250, sensorId=humid-sensor-1}, timestamp=1775810967250}
+Message{id='759b1bfa-ca12-49e9-97d1-41b1182a6fb1', payload={humidity=59.8, unit=%, timestamp=1775810971228, sensorId=humid-sensor-1}, timestamp=1775810971228}
+Message{id='040dee50-6883-4597-a942-f2893ad8a1dc', payload={humidity=65.2, unit=%, timestamp=1775810974229, sensorId=humid-sensor-1}, timestamp=1775810974229}
+Message{id='bd365f04-c3d0-48d1-bc2c-08e6cc12352e', payload={humidity=33.8, unit=%, timestamp=1775810976227, sensorId=humid-sensor-1}, timestamp=1775810976227}
+Message{id='012f0549-3fde-4a16-95d1-28a94efccf81', payload={humidity=42.6, unit=%, timestamp=1775810977223, sensorId=humid-sensor-1}, timestamp=1775810977223}
