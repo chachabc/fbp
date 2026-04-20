@@ -1,8 +1,8 @@
 package com.fbp.engine.core;
 
-import com.fbp.engine.node.FilterNode;
-import com.fbp.engine.node.GeneratorNode;
-import com.fbp.engine.node.PrintNode;
+import com.fbp.engine.node.stage1.FilterNode;
+import com.fbp.engine.node.stage1.GeneratorNode;
+import com.fbp.engine.node.stage1.PrintNode;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;

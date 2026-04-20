@@ -1,8 +1,8 @@
 package com.fbp.engine.core;
 
-import com.fbp.engine.node.GeneratorNode;
-import com.fbp.engine.node.PrintNode;
-import com.fbp.engine.node.TimerNode;
+import com.fbp.engine.node.stage1.GeneratorNode;
+import com.fbp.engine.node.stage1.PrintNode;
+import com.fbp.engine.node.stage1.TimerNode;
 import org.junit.jupiter.api.*;
 
 class FlowEngineTest {

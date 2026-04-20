@@ -3,12 +3,13 @@ package com.fbp.engine.node;
 import com.fbp.engine.core.Connection;
 import com.fbp.engine.core.InputPort;
 import com.fbp.engine.message.Message;
+import com.fbp.engine.node.stage1.GeneratorNode;
+import com.fbp.engine.node.stage1.LogNode;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
-import javax.swing.*;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;

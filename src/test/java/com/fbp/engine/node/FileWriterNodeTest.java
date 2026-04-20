@@ -1,6 +1,7 @@
 package com.fbp.engine.node;
 
 import com.fbp.engine.message.Message;
+import com.fbp.engine.node.stage1.FileWriterNode;
 import org.junit.jupiter.api.*;
 
 import java.io.IOException;
