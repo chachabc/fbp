@@ -21,6 +21,13 @@ public class SplitNode extends AbstractNode {
         if (!message.hasKey(key)){
             return;
         }
+
+        Object raw = message.get(key);
+        if (!(raw instanceof Number)) {
+            System.out.println("[" + getId() + "] 경고: '" + key + "' 값이 숫자가 아님");
+            return;
+        }
+
         Number value = message.get(key);
         if (value.doubleValue() >= threshold){
             send("match", message);

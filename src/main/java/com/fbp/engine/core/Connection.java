@@ -4,6 +4,10 @@ import com.fbp.engine.message.Message;
 
 import java.util.concurrent.LinkedBlockingQueue;
 
+/**
+ * 두 포트를 잇는 메시지 버퍼 채널.
+ * LinkedBlockingQueue 기반으로 스레드 안전하게 메시지를 전달한다.
+ */
 public class Connection {
     private final String id;
     private final LinkedBlockingQueue<Message> buffer;

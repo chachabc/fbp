@@ -4,7 +4,10 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.UUID;
-
+/**
+ * 노드 간 전달되는 불변 데이터 패킷.
+ * UUID, 페이로드(Map), 타임스탬프를 가지며 생성 후 수정 불가.
+ */
 public class Message {
     private final String id;
     private final Map<String, Object> payload;

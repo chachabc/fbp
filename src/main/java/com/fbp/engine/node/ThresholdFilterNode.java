@@ -18,14 +18,20 @@ public class ThresholdFilterNode extends AbstractNode {
 
     @Override
     protected void onProcess(Message message) {
-            if (!message.hasKey(fieldName)) return;
+        if (!message.hasKey(fieldName)) return;
 
-            Number value = message.get(fieldName);
+        Number value = message.get(fieldName);
 
-            if (value.doubleValue() > threshold){
-                send("alert", message);
-            } else {
-                send("normal", message);
-            }
+        Object raw = message.get(fieldName);
+        if (!(raw instanceof Number)) {
+            System.out.println("[" + getId() + "] 경고: '" + fieldName + "' 값이 숫자가 아님");
+            return;
+        }
+
+        if (value.doubleValue() > threshold){
+            send("alert", message);
+        } else {
+            send("normal", message);
+        }
     }
 }

@@ -2,6 +2,10 @@ package com.fbp.engine.core;
 
 import java.util.*;
 
+/**
+ * 노드와 Connection을 하나의 단위로 묶어 관리하는 클래스.
+ * 연결 정의, 유효성 검증, 일괄 초기화/종료를 담당한다.
+ */
 public class Flow {
     private final String id;
     private final Map<String, AbstractNode> nodes;
@@ -38,7 +42,7 @@ public class Flow {
         InputPort inputPort = targetNode.getInputPort(targetPort);
 
         if (outputPort == null) throw new IllegalArgumentException("소스 포트 없음: " + sourcePort);
-        if (inputPort == null) throw new IllegalArgumentException("타겟 포트 없음: " + sourcePort);
+        if (inputPort == null) throw new IllegalArgumentException("타겟 포트 없음: " + targetPort);
 
         String connectId = sourceNodeId + ":" + sourcePort + "->" + targetNodeId + ":" + targetPort;
         Connection connection = new Connection(connectId);

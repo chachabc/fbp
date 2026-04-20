@@ -1,9 +1,6 @@
 package com.fbp.engine.node;
 
 import com.fbp.engine.core.AbstractNode;
-import com.fbp.engine.core.DefaultInputPort;
-import com.fbp.engine.core.InputPort;
-import com.fbp.engine.core.Node;
 import com.fbp.engine.message.Message;
 
 public class PrintNode extends AbstractNode {

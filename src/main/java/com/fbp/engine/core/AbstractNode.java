@@ -5,12 +5,17 @@ import com.fbp.engine.message.Message;
 import java.util.HashMap;
 import java.util.Map;
 
+/**
+ * Node 인터페이스의 공통 구현체.
+ * id 관리, 포트 맵 관리, Template Method 패턴으로 onProcess() 위임.
+ * 모든 구체 노드는 이 클래스를 상속하여 onProcess()만 구현하면 된다.
+ */
 public abstract class AbstractNode implements Node{
     private final String id;
     private final Map<String, InputPort> inputPorts;
     private final Map<String, OutputPort> outputPorts;
 
-    public AbstractNode(String id){
+    protected AbstractNode(String id){
         this.id = id;
         this.inputPorts = new HashMap<>();
         this.outputPorts = new HashMap<>();
@@ -19,6 +24,10 @@ public abstract class AbstractNode implements Node{
     //Port Register
     protected void addInputPort(String name){
         inputPorts.put(name, new DefaultInputPort(name, this));
+    }
+
+    protected void addInputPort(String name, InputPort port) {
+        inputPorts.put(name, port);
     }
 
     protected void addOutputPort(String name){

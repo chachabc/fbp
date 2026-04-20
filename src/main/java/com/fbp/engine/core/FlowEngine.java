@@ -4,6 +4,10 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
+/**
+ * FBP 엔진의 최상위 관리자.
+ * Flow를 등록/시작/정지하고 엔진 전체 상태를 관리한다.
+ */
 public class FlowEngine {
     public enum State {INITIALIZED, RUNNING, STOPPED}
 

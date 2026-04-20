@@ -49,4 +49,8 @@ public class TimerNode extends AbstractNode {
     @Override
     protected void onProcess(Message message){
     }
+
+    public int getTickCount() {
+        return tickCount;
+    }
 }
