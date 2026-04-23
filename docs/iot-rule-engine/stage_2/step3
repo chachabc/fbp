@@ -1,0 +1,19 @@
+=== A. FC 03 요청 — 슬레이브1, 주소10부터 5개 읽기 ===
+HEX: 00 01 00 00 00 06 01 03 00 0A 00 05
+Transaction ID : 1
+Protocol ID    : 0x0000
+Length         : 6
+Unit ID        : 1
+Function Code  : 0x03
+Start Address  : 10
+Quantity       : 5
+
+=== B. FC 06 요청 — 슬레이브1, 주소5에 1234 쓰기 ===
+HEX: 00 02 00 00 00 06 01 06 00 05 04 D2
+...
+Value              : 1234 (0x04D2)
+
+=== C. FC 03 응답 — 레지스터 5개: [100, 200, 300, 400, 500] ===
+HEX: 00 01 00 00 00 0D 01 03 0A 00 64 00 C8 01 2C 01 90 01 F4
+Byte Count     : 10
+Register Values: 100 200 300 400 500

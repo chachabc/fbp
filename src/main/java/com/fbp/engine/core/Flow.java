@@ -17,6 +17,11 @@ public class Flow {
 
     private FlowState flowState;
 
+    /**
+     * Flow를 생성한다.
+     *
+     * @param id Flow의 고유 식별자
+     */
     public Flow(String id){
         this.id = id;
         this.nodes = new HashMap<>();
@@ -24,12 +29,30 @@ public class Flow {
         this.flowState = FlowState.STOPPED;
     }
 
+    /**
+     * 노드를 Flow에 등록한다.
+     * 메서드 체이닝을 지원한다.
+     *
+     * @param node 등록할 노드
+     * @return 이 Flow 인스턴스
+     */
     public Flow addNode(AbstractNode node){
         nodes.put(node.getId(), node);
         graph.put(node.getId(), new ArrayList<>());
         return this;
     }
 
+    /**
+     * 두 노드의 포트를 Connection으로 연결한다.
+     * 메서드 체이닝을 지원한다.
+     *
+     * @param sourceNodeId 송신 노드 ID
+     * @param sourcePort   송신 포트 이름
+     * @param targetNodeId 수신 노드 ID
+     * @param targetPort   수신 포트 이름
+     * @return 이 Flow 인스턴스
+     * @throws IllegalStateException 노드 ID 또는 포트 이름이 존재하지 않는 경우
+     */
     public Flow connect(String sourceNodeId, String sourcePort,
                         String targetNodeId, String targetPort){
         AbstractNode sourceNode = nodes.get(sourceNodeId);
@@ -55,16 +78,28 @@ public class Flow {
         return this;
     }
 
+    /**
+     * 등록된 모든 노드의 initialize()를 호출하고 Flow 상태를 RUNNING으로 변경한다.
+     */
     public void initialize(){
         nodes.values().forEach(AbstractNode::initialize);
         this.flowState = FlowState.RUNNING;
     }
 
+    /**
+     * 등록된 모든 노드의 shutdown()을 호출하고 Flow 상태를 STOPPED로 변경한다.
+     */
     public void shutdown(){
         nodes.values().forEach(AbstractNode::shutdown);
         this.flowState = FlowState.STOPPED;
     }
 
+    /**
+     * Flow의 유효성을 검증하고 오류 목록을 반환한다.
+     * 노드가 없거나 순환 참조가 있는 경우 해당 오류 메시지를 포함한다.
+     *
+     * @return 오류 메시지 목록. 유효하면 빈 리스트를 반환한다.
+     */
     public List<String> validate(){
         List<String> errors = new ArrayList<>();
         if (nodes.isEmpty()){
@@ -100,8 +135,31 @@ public class Flow {
         return false;
     }
 
+    /**
+     * Flow의 고유 식별자를 반환한다.
+     *
+     * @return Flow ID
+     */
     public String getId(){return id;}
+
+    /**
+     * 등록된 노드 맵을 반환한다.
+     *
+     * @return 노드 ID를 키로 하는 노드 맵
+     */
     public Map<String, AbstractNode> getNodes(){return nodes;}
+
+    /**
+     * 생성된 Connection 목록을 반환한다.
+     *
+     * @return Connection 목록
+     */
     public List<Connection> getConnections(){return connections;}
+
+    /**
+     * 현재 Flow의 실행 상태를 반환한다.
+     *
+     * @return {@link FlowState#RUNNING} 또는 {@link FlowState#STOPPED}
+     */
     public FlowState getFlowState(){return flowState;}
 }
