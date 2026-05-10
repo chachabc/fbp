@@ -1,0 +1,322 @@
+================================================================
+Part E — InfluxDB 연동
+================================================================
+
+[ 스펙 요구사항 ]
+
+1. 메트릭 이벤트를 InfluxDB line protocol로 변환
+2. 배치 쓰기로 처리량 확보 (개별 쓰기 X)
+3. InfluxDB 일시 장애 시 로컬 버퍼링 → 복구 시 재전송
+4. measurement / tag / field 스키마 표준화
+
+Measurement 스키마:
+  node_stats   — flow_id, node_id 태그 / in_count, out_count, avg_time_ms, p99_time_ms, errors
+  wire_stats   — flow_id, wire_id 태그 / delivered, queue_size, dropped, payload_bytes
+  flow_stats   — flow_id 태그 / processed, errors
+  sensor_stats_1m — flow_id, sensor_name 태그 / avg, min, max, count (1분 집계)
+  sensor_stats_1h — (1시간 집계)
+  sensor_stats_1d — (1일 집계)
+
+----------------------------------------------------------------
+[ 구현 접근법 ]
+
+InfluxBatchWriter(PointSink 구현체)가 두 단계로 처리한다:
+  1. accept(): pendingQueue.offer() — 즉시 반환, 블로킹 없음
+  2. writerThread(가상 스레드): 100ms 또는 batchSize만큼 모아서 HTTP POST
+
+전송 실패 시 지수 backoff(200ms, 400ms, 800ms...) 재시도 후
+모두 실패하면 LocalBuffer(메모리)에 저장한다.
+다음 전송 성공 시점에 LocalBuffer 내용을 함께 재전송한다.
+
+----------------------------------------------------------------
+[ 구현 코드 ]
+
+== InfluxWriterConfig.java ==
+
+public record InfluxWriterConfig(
+    String url,
+    String token,
+    String org,
+    String bucket,
+    int    batchSize,
+    long   flushIntervalMs,
+    int    maxRetryAttempts,
+    long   initialBackoffMs,
+    int    localBufferMaxSize
+) {
+    public static InfluxWriterConfig defaults(
+            String url, String token, String org, String bucket) {
+        return new InfluxWriterConfig(url, token, org, bucket,
+                1000, 1000L, 5, 200L, 100_000);
+    }
+}
+
+----------------------------------------------------------------
+== InfluxBatchWriter.java ==
+
+public class InfluxBatchWriter implements PointSink, AutoCloseable {
+
+    private final InfluxWriterConfig config;
+    private final LineProtocolEncoder encoder;
+    private final LocalBuffer localBuffer;
+    private final BlockingQueue<MetricPoint> pendingQueue;
+    private final Thread writerThread;
+    private final LongAdder totalWritten = new LongAdder();
+    private final LongAdder totalFailed  = new LongAdder();
+    private volatile boolean running     = true;
+
+    public InfluxBatchWriter(InfluxWriterConfig config) {
+        this.config       = config;
+        this.encoder      = new LineProtocolEncoder();
+        this.localBuffer  = new LocalBuffer(config.localBufferMaxSize());
+        this.pendingQueue = new ArrayBlockingQueue<>(config.batchSize() * 4);
+        this.writerThread = Thread.ofVirtual()
+                .name("fbp-influx-writer")
+                .start(this::writerLoop);
+    }
+
+    // Hot path: 즉시 반환
+    @Override
+    public void accept(MetricPoint point) {
+        if (!pendingQueue.offer(point)) {
+            log.debug("[Influx] pending 큐 가득 참 — 포인트 드롭");
+        }
+    }
+}
+
+----------------------------------------------------------------
+== writerLoop() — 배치 수집 + 전송 ==
+
+private void writerLoop() {
+    List<MetricPoint> batch = new ArrayList<>(config.batchSize());
+    long lastFlushMs        = System.currentTimeMillis();
+
+    while (running || !pendingQueue.isEmpty()) {
+        try {
+            MetricPoint point = pendingQueue.poll(100, TimeUnit.MILLISECONDS);
+            if (point != null) batch.add(point);
+
+            boolean timeTick  = System.currentTimeMillis() - lastFlushMs >= config.flushIntervalMs();
+            boolean batchFull = batch.size() >= config.batchSize();
+
+            if (!batch.isEmpty() && (timeTick || batchFull)) {
+                sendBatch(batch);
+                batch.clear();
+                lastFlushMs = System.currentTimeMillis();
+            }
+
+            // 이전 실패분 재전송 (배치가 비었을 때만)
+            if (!localBuffer.isEmpty() && batch.isEmpty()) {
+                retryFromBuffer();
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    if (!batch.isEmpty()) sendBatch(batch);  // 종료 전 남은 배치 flush
+}
+
+----------------------------------------------------------------
+== sendBatch() + 지수 backoff 재시도 ==
+
+private void sendBatch(List<MetricPoint> batch) {
+    List<String> encoded = batch.stream().map(encoder::encode).toList();
+    String lineProtocol  = String.join("\n", encoded);
+    boolean success      = sendWithRetry(lineProtocol, batch.size());
+    if (!success) {
+        localBuffer.addAll(encoded);  // 실패 시 로컬 버퍼에 보관
+    }
+}
+
+private boolean sendWithRetry(String lineProtocol, int pointCount) {
+    for (int attempt = 0; attempt < config.maxRetryAttempts(); attempt++) {
+        if (attempt > 0) {
+            long backoff = config.initialBackoffMs() * (1L << (attempt - 1));
+            // 200ms, 400ms, 800ms, 1600ms, 3200ms (max 30초)
+            Thread.sleep(Math.min(backoff, 30_000));
+        }
+        if (trySend(lineProtocol, pointCount)) return true;
+    }
+    totalFailed.increment();
+    return false;
+}
+
+----------------------------------------------------------------
+== trySend() — gzip HTTP POST ==
+
+private boolean trySend(String lineProtocol, int pointCount) {
+    try {
+        byte[] body = gzip(lineProtocol.getBytes(StandardCharsets.UTF_8));
+
+        HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(config.url() + "/api/v2/write?org=" + config.org()
+                        + "&bucket=" + config.bucket() + "&precision=ns"))
+                .header("Authorization", "Token " + config.token())
+                .header("Content-Type", "text/plain; charset=utf-8")
+                .header("Content-Encoding", "gzip")
+                .POST(HttpRequest.BodyPublishers.ofByteArray(body))
+                .timeout(Duration.ofSeconds(10))
+                .build();
+
+        HttpResponse<String> response = httpClient.send(request,
+                HttpResponse.BodyHandlers.ofString());
+
+        if (response.statusCode() == 204) {
+            totalWritten.add(pointCount);
+            return true;
+        }
+        log.warn("[Influx] 쓰기 실패 (status={}, body={})",
+                response.statusCode(), response.body());
+        return false;
+    } catch (IOException | InterruptedException e) {
+        return false;
+    }
+}
+
+----------------------------------------------------------------
+== LineProtocolEncoder.java ==
+
+public String encode(MetricPoint point) {
+    StringBuilder sb = new StringBuilder();
+
+    // measurement
+    sb.append(escapeMeasurement(point.measurement()));
+
+    // tags (알파벳 순 정렬)
+    point.tags().entrySet().stream()
+            .sorted(Map.Entry.comparingByKey())
+            .forEach(e -> sb.append(',')
+                    .append(escapeTag(e.getKey())).append('=')
+                    .append(escapeTag(e.getValue())));
+
+    sb.append(' ');
+
+    // fields
+    boolean first = true;
+    for (Map.Entry<String, Object> e : point.fields().entrySet()) {
+        if (!first) sb.append(',');
+        sb.append(escapeFieldKey(e.getKey()))
+          .append('=')
+          .append(encodeFieldValue(e.getValue()));
+        first = false;
+    }
+
+    sb.append(' ').append(point.timestampNs());
+    return sb.toString();
+}
+
+// 타입 매핑:
+//   Long/Integer → 123i (정수)
+//   Double/Float → 1.23 (실수)
+//   Boolean      → true/false
+//   String       → "value" (이스케이프)
+private String encodeFieldValue(Object value) {
+    if (value instanceof Long l)    return l + "i";
+    if (value instanceof Integer i) return i + "i";
+    if (value instanceof Double d)  return String.valueOf(d);
+    if (value instanceof Float f)   return String.valueOf(f);
+    if (value instanceof Boolean b) return b.toString();
+    if (value instanceof String s)  return '"' + s.replace("\\", "\\\\")
+                                                   .replace("\"", "\\\"") + '"';
+    return String.valueOf(value);
+}
+
+----------------------------------------------------------------
+== LocalBuffer.java — 장애 시 로컬 보관 ==
+
+public class LocalBuffer {
+    private final int maxSize;
+    private final Deque<String> lines = new ArrayDeque<>();
+
+    public void addAll(List<String> newLines) {
+        for (String line : newLines) {
+            if (lines.size() >= maxSize) {
+                lines.pollFirst();  // 오래된 것부터 폐기 (FIFO)
+            }
+            lines.addLast(line);
+        }
+    }
+
+    public List<String> drainBatch(int batchSize) {
+        List<String> batch = new ArrayList<>();
+        while (!lines.isEmpty() && batch.size() < batchSize) {
+            batch.add(lines.pollFirst());
+        }
+        return batch;
+    }
+}
+
+----------------------------------------------------------------
+== Line Protocol 예시 출력 ==
+
+node_stats,flow_id=temp-sensor-local,node_id=sensor avg_time_ms=0.12,errors=0i,in_count=45i,out_count=45i,p99_time_ms=0.5 1746706800000000000
+
+wire_stats,flow_id=temp-sensor-local,wire_id=timer.out-sensor.trigger delivered=45i,dropped=0i,payload_bytes=0i,queue_size=0i 1746706800000000000
+
+sensor_stats_1m,flow_id=temp-sensor-local,sensor_name=temperature avg=28.4,count=30i,max=38.1,min=21.5 1746706800000000000
+
+----------------------------------------------------------------
+== Docker 환경 설정 ==
+
+InfluxDB v2.7 Docker Compose:
+  DOCKER_INFLUXDB_INIT_MODE:   setup
+  DOCKER_INFLUXDB_INIT_ORG:    fbp
+  DOCKER_INFLUXDB_INIT_BUCKET: fbp-metrics
+  DOCKER_INFLUXDB_INIT_RETENTION: 30d
+  DOCKER_INFLUXDB_INIT_ADMIN_TOKEN: fbp-admin-token-please-change
+
+Java 연결 설정 (Main.java buildInfluxConfig):
+  URL:    http://localhost:8086
+  Token:  fbp-admin-token-please-change
+  Org:    fbp
+  Bucket: fbp-metrics
+
+환경변수 오버라이드 가능:
+  FBP_INFLUX_URL, FBP_INFLUX_TOKEN, FBP_INFLUX_ORG, FBP_INFLUX_BUCKET
+
+----------------------------------------------------------------
+== Grafana 대시보드 연동 ==
+
+datasource (influxdb.yml):
+  uid:          influxdb-fbp      ← 하드코딩 (파일 프로비저닝 시 ${DS_...} 미지원)
+  type:         influxdb
+  version:      Flux
+  url:          http://influxdb:8086
+  token:        fbp-admin-token-please-change
+
+대시보드 패널 (Flux 쿼리 예시):
+  // Node In/Out
+  from(bucket: "fbp-metrics")
+    |> range(start: v.timeRangeStart)
+    |> filter(fn: (r) => r._measurement == "node_stats")
+    |> filter(fn: (r) => r._field == "in_count" or r._field == "out_count")
+    |> map(fn: (r) => ({ r with _field: r.node_id + "." + r._field }))
+
+  // Sensor Temperature 1m avg
+  from(bucket: "fbp-metrics")
+    |> range(start: v.timeRangeStart)
+    |> filter(fn: (r) => r._measurement == "sensor_stats_1m" and r.sensor_name == "temperature")
+    |> filter(fn: (r) => r._field == "avg" or r._field == "min" or r._field == "max")
+
+----------------------------------------------------------------
+[ 설계 결정 근거 ]
+
+Q. gzip 압축을 사용한 이유?
+A. Line protocol은 텍스트 기반이므로 gzip으로 네트워크 대역폭을 크게
+   절감할 수 있다. InfluxDB 2.x는 gzip 요청을 공식 지원한다.
+
+Q. 로컬 버퍼 폐기 기준(FIFO)?
+A. 가장 오래된 raw 데이터를 먼저 버린다. 오래된 통계보다 최근 통계가
+   운영에 더 중요하기 때문. 단 flow_events 같은 이벤트는 별도 영속 저장
+   대상으로 분류하는 것이 이상적이나 현재 구현에서는 동일 버퍼 사용.
+
+Q. HTTP 클라이언트를 외부 주입 가능하게 한 이유?
+A. InfluxBatchWriter(config, HttpClient) 생성자를 패키지 전용으로 노출하여
+   테스트에서 MockHttpClient로 교체할 수 있게 했다. 실제 HTTP 없이
+   전송 로직을 단위 테스트할 수 있다.
+
+Q. precision=ns로 고정한 이유?
+A. MetricPoint.timestampNs()가 System.nanoTime()을 UTC 나노초로 반환한다.
+   나노초 정밀도를 유지하면 10초 주기 tick에서 여러 포인트가 동일
+   타임스탬프가 되지 않는다.

@@ -1,0 +1,47 @@
+{
+  "id": "temp-sensor-local",
+  "transport": { "type": "local" },
+  "metrics": {
+    "domain": [
+      {
+        "name": "temperature",
+        "source": { "node": "sensor", "port": "out" },
+        "field": "temperature",
+        "windows": ["1m", "1h"]
+      }
+    ]
+  },
+  "nodes": [
+    {
+      "id": "timer",
+      "type": "TimerNode",
+      "config": { "intervalMs": 2000 }
+    },
+    {
+      "id": "sensor",
+      "type": "TemperatureSensorNode",
+      "config": { "min": 20.0, "max": 40.0 }
+    },
+    {
+      "id": "temp-rule",
+      "type": "ThresholdFilterNode",
+      "config": { "fieldName": "temperature", "threshold": 30.0 }
+    },
+    {
+      "id": "alert",
+      "type": "AlertNode",
+      "config": {}
+    },
+    {
+      "id": "normal-log",
+      "type": "LogNode",
+      "config": {}
+    }
+  ],
+  "connections": [
+    { "from": "timer:out",      "to": "sensor:trigger" },
+    { "from": "sensor:out",     "to": "temp-rule:in"   },
+    { "from": "temp-rule:alert","to": "alert:in"       },
+    { "from": "temp-rule:normal","to": "normal-log:in" }
+  ]
+}

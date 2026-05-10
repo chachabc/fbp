@@ -1,0 +1,19 @@
+{
+  "id": "timer-print",
+  "transport": { "type": "local" },
+  "nodes": [
+    {
+      "id": "timer",
+      "type": "TimerNode",
+      "config": { "intervalMs": 2000 }
+    },
+    {
+      "id": "printer",
+      "type": "PrintNode",
+      "config": {}
+    }
+  ],
+  "connections": [
+    { "from": "timer:out", "to": "printer:in" }
+  ]
+}

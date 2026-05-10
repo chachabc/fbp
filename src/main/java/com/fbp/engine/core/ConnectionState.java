@@ -13,8 +13,8 @@ package com.fbp.engine.core;
  *     ▲                              │                              │
  *     │                     connect() 실패                  연결 끊김
  *     │                              │                     onConnectionLost()
- *     │                              ▼                              │
- *     │                    재시도 스케줄러 시작                       │
+ *     │                              ▼
+ *     │                    재시도 스케줄러 시작
  *     │                         (재시도 중)──connect() 성공──▶ CONNECTED
  *     │                              │
  *     │                     최대 재시도 초과

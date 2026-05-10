@@ -1,0 +1,216 @@
+================================================================
+Part B — 엔진 통합: FlowManager 확장
+================================================================
+
+[ 스펙 요구사항 ]
+
+1. FlowManager가 플로우 정의의 transport 섹션을 인식하여
+   적절한 Connection 구현체를 생성
+2. 기존 로컬 플로우와 MQTT 브릿지 플로우가 동일한 엔진에서 공존
+3. 플로우 생명주기(deploy/start/stop/remove) 시
+   브릿지 연결의 MQTT 세션도 함께 관리
+
+변경 전: Connection(BlockingQueue)으로 모든 연결을 구성
+변경 후: transport 섹션에 따라 LocalConnection 또는 MqttBridgeConnection 선택
+
+----------------------------------------------------------------
+[ 구현 접근법 ]
+
+FlowManager.deploy()에서 각 ConnectionDefinition을 처리할 때
+createConnection() 메서드가 FlowDefinition의 transport를 확인하여
+구현체를 결정한다. 노드 코드와 러너 코드는 전혀 변경하지 않았다.
+
+플로우 정의 JSON에서 transport 섹션:
+  - 없으면  → LocalConnection (기존 동작)
+  - "local" → LocalConnection
+  - "mqtt"  → MqttBridgeConnection (시스템 브로커 경유)
+
+----------------------------------------------------------------
+[ 구현 코드 ]
+
+== FlowManager.java — createConnection() ==
+
+private Connection createConnection(FlowDefinition definition, ConnectionDefinition connDef) {
+    String connId = connectionId(connDef);
+    TransportDefinition transport = definition.getTransport();
+
+    if (transport.isMqtt()) {
+        // 토픽: fbp/{flowId}/{srcNode}.{srcPort}-{dstNode}.{dstPort}
+        String topic = "fbp/" + definition.getId() + "/" + connId;
+        try {
+            return new MqttBridgeConnection(
+                    connId,
+                    transport.getBroker(),   // tcp://localhost:1884 (시스템 브로커)
+                    topic,
+                    transport.getQos(),
+                    metricsCollector,
+                    definition.getId());
+        } catch (MqttException e) {
+            throw new FlowManagerException("MQTT 연결 생성 실패: " + connId, e);
+        }
+    }
+    // local (또는 transport 섹션 없음)
+    return new LocalConnection(connId, metricsCollector, definition.getId());
+}
+
+----------------------------------------------------------------
+== FlowManager.java — deploy() ==
+
+public void deploy(FlowDefinition definition) {
+    String flowId = definition.getId();
+    if (flows.containsKey(flowId)) {
+        throw new FlowManagerException("이미 배포된 플로우 id: " + flowId);
+    }
+
+    Map<String, Node> nodeMap = createNodes(definition);
+    List<Connection> connections       = new ArrayList<>();
+    Map<String, List<Connection>> nodeInputs   = new HashMap<>();
+    Map<String, WireRuntime> wireRuntimes      = new LinkedHashMap<>();
+
+    for (ConnectionDefinition connDef : definition.getConnections()) {
+        Connection conn = createConnection(definition, connDef);  // ← transport에 따라 분기
+        String wireId   = connectionId(connDef);
+
+        if (metricsCollector != null) {
+            metricsCollector.registerWire(wireId, flowId,
+                    connDef.getSourceNodeId(), connDef.getSourcePort());
+        }
+
+        wireOutput(nodeMap, connDef, conn);  // source 노드의 OutputPort에 연결
+        connections.add(conn);
+        nodeInputs.computeIfAbsent(connDef.getTargetNodeId(), k -> new ArrayList<>()).add(conn);
+        wireRuntimes.put(wireId, new WireRuntime(conn, null, connDef));
+    }
+
+    if (metricsCollector != null) {
+        metricsCollector.registerFlow(flowId, definition.getDomainMetrics());
+    }
+
+    ManagedFlow flow = new ManagedFlow(definition, nodeMap, connections, nodeInputs, wireRuntimes);
+    flows.put(flowId, flow);
+}
+
+----------------------------------------------------------------
+== FlowManager.java — remove() ==
+
+public void remove(String flowId) {
+    ManagedFlow flow = requireFlow(flowId);
+    if (flow.state == FlowState.RUNNING) {
+        stop(flowId);
+    }
+    flow.connections.forEach(Connection::close);  // MQTT: 구독 해지 + 클라이언트 닫기
+    if (metricsCollector != null) {
+        metricsCollector.unregisterFlow(flowId);
+    }
+    flows.remove(flowId);
+}
+
+MqttBridgeConnection.close()가 호출되면:
+  1. subscriber.unsubscribe(topic)
+  2. subscriber.disconnect() → subscriber.close()
+  3. publisher.disconnect()  → publisher.close()
+  4. internalQueue.clear()
+
+----------------------------------------------------------------
+== FlowManager.java — LegacyConnectionBridge ==
+
+기존 AbstractNode(stage1/stage2)는 OutputPort에 com.fbp.engine.core.Connection
+(구 클래스)을 등록한다. 새 stage_3_p.Connection 인터페이스와의 타입 불일치를
+해결하기 위해 어댑터 패턴을 사용했다.
+
+private static class LegacyConnectionBridge extends com.fbp.engine.core.Connection {
+
+    private final Connection target;  // stage_3_p.Connection
+
+    LegacyConnectionBridge(String id, Connection target) {
+        super(id, 1);
+        this.target = target;
+    }
+
+    @Override
+    public void deliver(Message message) { target.deliver(message); }
+
+    @Override
+    public int getBufferSize() { return target.getBufferSize(); }
+}
+
+// 사용 위치 (wireOutput):
+outputPort.connect(new LegacyConnectionBridge(conn.getId(), conn));
+
+----------------------------------------------------------------
+== NodeRunner (FlowManager 내부 record) ==
+
+/** Connection.poll()로 메시지를 꺼내 노드에 전달하는 가상 스레드 러너 */
+private record NodeRunner(String flowId, Node node, Connection connection,
+                          MetricsCollector collector) implements Runnable {
+    @Override
+    public void run() {
+        while (!Thread.currentThread().isInterrupted()) {
+            try {
+                Message message = connection.poll();  // LocalConnection이든 MqttBridge든 동일
+                long t0 = System.nanoTime();
+                boolean hadError = false;
+                try {
+                    node.process(message);
+                } catch (Exception e) {
+                    hadError = true;
+                }
+                if (collector != null) {
+                    collector.record(new NodeMetricEvent(
+                            flowId, node.getId(), System.nanoTime() - t0, hadError));
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        }
+    }
+}
+
+노드 러너는 Connection 구현체에 무관하게 동일하게 동작한다.
+
+----------------------------------------------------------------
+== 플로우 정의 JSON 예시 ==
+
+로컬 플로우 (BlockingQueue):
+{
+  "id": "health-check",
+  "transport": { "type": "local" },
+  "nodes": [
+    {"id": "timer",   "type": "TimerNode",   "config": {"intervalMs": 5000}},
+    {"id": "counter", "type": "CounterNode", "config": {}},
+    {"id": "logger",  "type": "LogNode",     "config": {}}
+  ],
+  "connections": [
+    {"from": "timer:out",   "to": "counter:in"},
+    {"from": "counter:out", "to": "logger:in"}
+  ]
+}
+
+MQTT 브릿지 플로우 (시스템 브로커 경유):
+{
+  "id": "smart-building",
+  "transport": {
+    "type": "mqtt",
+    "broker": "tcp://localhost:1884",
+    "qos": 1
+  },
+  "nodes": [...],
+  "connections": [...]
+}
+
+----------------------------------------------------------------
+[ 설계 결정 근거 ]
+
+Q. 로컬 플로우와 MQTT 플로우가 동일 엔진에서 공존할 수 있는가?
+A. 네. FlowManager는 ConcurrentHashMap<String, ManagedFlow>로 모든
+   플로우를 관리한다. transport 선택은 deploy() 시점에만 이루어지며,
+   이후 start/stop/remove는 transport와 무관하게 동일하게 동작한다.
+
+Q. 브릿지 플로우를 stop 후 재시작하면 MQTT 구독은 어떻게 되는가?
+A. stop() 시 러너 스레드만 중단하고 Connection은 닫지 않는다.
+   restart() 시 러너 스레드를 재시작하여 기존 subscriber의 구독이
+   살아있는 internalQueue를 poll()하기 시작한다.
+   remove() 시에만 Connection.close()를 호출하여 MQTT 세션을 해제.
+
+Q. 두 플로우가 같은 시스템 브로커를 사용할 때 토픽 충돌은?
+A. 토픽에 flowId를 포함하므로(fbp/{flowId}/...) 충돌이 없다.

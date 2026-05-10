@@ -1,6 +1,8 @@
 package com.fbp.engine.core;
 
 import com.fbp.engine.message.Message;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.HashMap;
 import java.util.Map;
@@ -11,6 +13,7 @@ import java.util.Map;
  * 모든 구체 노드는 이 클래스를 상속하여 onProcess()만 구현하면 된다.
  */
 public abstract class AbstractNode implements Node{
+    private static final Logger log = LoggerFactory.getLogger(AbstractNode.class);
     private final String id;
     private final Map<String, InputPort> inputPorts;
     private final Map<String, OutputPort> outputPorts;
@@ -101,9 +104,9 @@ public abstract class AbstractNode implements Node{
      */
     @Override
     public final void process(Message message) {
-        System.out.println("[" + id + "] processing message...");
+        log.debug("[{}] processing message...", id);
         onProcess(message);
-        System.out.println("[" + id + "] done" );
+        log.debug("[{}] done", id);
     }
 
     /**

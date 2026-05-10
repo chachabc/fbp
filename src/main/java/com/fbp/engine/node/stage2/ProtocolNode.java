@@ -82,6 +82,11 @@ public abstract class ProtocolNode extends AbstractNode {
         Object maxRetriesVal = config.get("maxRetries");
         int maxRetries = (maxRetriesVal instanceof Number number) ? number.intValue() : 10;
 
+        /**
+         * schedule(task, delay, unit): 딱 한 번, 정해진 시간(delay) 후에 실행합니다.
+         * scheduleAtFixedRate: 작업 시작 시점을 기준으로 일정한 간격마다 반복합니다. (작업이 밀려도 정해진 주기를 지키려 노력함)
+         * scheduleWithFixedDelay: 이전 작업이 끝난 시점부터 일정 시간 뒤에 실행합니다. (작업 시간 + 대기 시간)
+         */
         reconnectScheduler = Executors.newSingleThreadScheduledExecutor( r -> {
             Thread thread = new Thread(r, getId() + "reconnect");
             thread.setDaemon(true);

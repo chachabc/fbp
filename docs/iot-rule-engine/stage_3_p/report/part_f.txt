@@ -1,0 +1,420 @@
+================================================================
+Part F — CLI를 통한 엔진 관리
+================================================================
+
+[ 스펙 요구사항 ]
+
+1. 플로우 전체 생명주기 관리 (배포, 시작, 정지, 재시작, 삭제)
+2. 동적 플로우 변경 명령 (노드/연결 추가·제거, 패치, 롤백)
+3. 노드 상태 조회 및 실시간 메시지 모니터링
+4. 와이어(Connection) 상태 조회 — transport 타입, 큐 상태 포함
+5. 엔진 전체 통계 및 도메인 통계 조회
+6. InfluxDB 연동 상태 확인
+
+구현된 전체 명령:
+  flow: list, deploy, start, stop, restart, remove, status,
+        patch, add-node, remove-node, add-wire, remove-wire,
+        update-config, history, rollback
+  node: list, info, stats
+  wire: list, info, stats
+  monitor: flow, node
+  sensor:  list, stats
+  stats, broker status, influx status, help, exit
+
+----------------------------------------------------------------
+[ 구현 접근법 ]
+
+FbpCli는 REPL(Read-Eval-Print Loop) 구조로 동작한다.
+FlowManager, MetricsCollector, InfluxBatchWriter에 직접 접근하여
+메모리 내 상태를 조회한다 (REST API 없이 직접 접근).
+
+monitor 명령은 가상 스레드(Virtual Thread)로 폴링하고,
+메인 스레드에서 readLine()으로 Enter 입력을 기다린다.
+
+sensor stats는 MetricsCollector의 in-memory 스냅샷을 쓰지 않고
+InfluxDB Flux API를 직접 HTTP POST로 조회한다.
+
+----------------------------------------------------------------
+[ 구현 코드 ]
+
+== FbpCli.java — REPL 구조 ==
+
+public void run(Reader in, PrintStream out) {
+    out.println("FBP Engine CLI — type 'help' for commands, 'exit' to quit.");
+    try (BufferedReader reader = new BufferedReader(in)) {
+        String line;
+        while (true) {
+            out.print("fbp> ");
+            out.flush();
+            line = reader.readLine();
+            if (line == null) break;
+            line = line.trim();
+            if (line.isEmpty()) continue;
+            if (!dispatch(line, out)) break;  // "exit" 시 false 반환
+        }
+    } catch (IOException e) {
+        out.println("[error] 입력 오류: " + e.getMessage());
+    }
+    out.println("Bye.");
+}
+
+private boolean dispatch(String line, PrintStream out) {
+    String[] args = line.split("\\s+");
+    try {
+        switch (args[0].toLowerCase()) {
+            case "flow"    -> handleFlow(args, out);
+            case "node"    -> handleNode(args, out);
+            case "wire"    -> handleWire(args, out);
+            case "stats"   -> handleStats(out);
+            case "influx"  -> handleInflux(args, out);
+            case "broker"  -> handleBroker(args, out);
+            case "monitor" -> handleMonitor(args, out);
+            case "sensor"  -> handleSensor(args, out);
+            case "help"    -> handleHelp(args, out);
+            case "exit", "quit" -> { return false; }
+            default -> out.println("알 수 없는 명령: " + args[0]);
+        }
+    } catch (FlowManagerException e) {
+        out.println("[error] " + e.getMessage());
+    } catch (Exception e) {
+        out.println("[error] " + e.getClass().getSimpleName() + ": " + e.getMessage());
+    }
+    return true;
+}
+
+----------------------------------------------------------------
+== flow list ==
+
+private void flowList(PrintStream out) {
+    Map<String, FlowState> flows = flowManager.list();
+    out.printf("%-30s %-10s %-10s %-6s %-6s%n", "ID", "STATUS", "TRANSPORT", "NODES", "WIRES");
+    out.println("-".repeat(65));
+    flows.forEach((id, state) -> {
+        FlowDefinition def = flowManager.getCurrentDefinition(id);
+        out.printf("%-30s %-10s %-10s %-6d %-6d%n",
+                id, state, def.getTransport().getType(),
+                def.getNodes().size(), def.getConnections().size());
+    });
+}
+
+출력 예시:
+  ID                             STATUS     TRANSPORT  NODES  WIRES
+  -----------------------------------------------------------------
+  health-check                   RUNNING    local      3      2
+  smart-building                 RUNNING    mqtt       4      3
+  temp-sensor-local              STOPPED    local      5      4
+
+----------------------------------------------------------------
+== flow status ==
+
+private void flowStatus(String[] args, PrintStream out) {
+    String flowId = req(args, 2, "flow status <id>");
+    FlowState state = flowManager.getStatus(flowId);
+    FlowDefinition def = flowManager.getCurrentDefinition(flowId);
+    Instant startedAt = flowManager.getStartedAt(flowId);
+
+    out.println("Flow: " + flowId);
+    out.println("  Status:    " + state);
+    out.println("  Transport: " + def.getTransport().getType());
+    out.println("  Nodes:     " + def.getNodes().size());
+    out.println("  Wires:     " + def.getConnections().size());
+    out.println("  Uptime:    " + formatDuration(Duration.between(startedAt, Instant.now())));
+    out.println("  Revision:  " + flowManager.getHistory(flowId).size());
+
+    if (metricsCollector != null) {
+        MetricsSnapshot snap = metricsCollector.getLastSnapshot();
+        MetricsSnapshot.FlowStatsSnapshot fs = snap.flows().get(flowId);
+        if (fs != null) {
+            double errPct = fs.processed() > 0 ? fs.errors() * 100.0 / fs.processed() : 0.0;
+            out.printf("  Processed: %,d messages%n", fs.processed());
+            out.printf("  Errors:    %d (%.3f%%)%n", fs.errors(), errPct);
+        }
+    }
+}
+
+----------------------------------------------------------------
+== node stats ==
+
+private void nodeStats(String[] args, PrintStream out) {
+    String flowId = req(args, 2, "node stats <flow-id> <node-id>");
+    String nodeId = req(args, 3, "node stats <flow-id> <node-id>");
+
+    MetricsSnapshot snap = metricsCollector.getLastSnapshot();
+    MetricsSnapshot.NodeStatsSnapshot ns = snap.nodes().get(flowId + "|" + nodeId);
+
+    out.println("Node: " + nodeId);
+    out.printf("  In:       %,d msg%n",   ns.inCount());
+    out.printf("  Out:      %,d msg%n",   ns.outCount());
+    out.printf("  Errors:   %d%n",         ns.errors());
+    out.printf("  Avg Time: %.2f ms%n",    ns.avgMs());
+    out.printf("  P99 Time: %.2f ms%n",    ns.p99Ms());
+}
+
+출력 예시:
+  Node: sensor
+    In:       120 msg
+    Out:      120 msg
+    Errors:   0
+    Avg Time: 0.08 ms
+    P99 Time: 0.45 ms
+
+----------------------------------------------------------------
+== wire list ==
+
+private void wireList(String[] args, PrintStream out) {
+    String flowId = req(args, 2, "wire list <flow-id>");
+    List<FlowManager.WireInfo> wires = flowManager.getWireInfos(flowId);
+    out.printf("%-35s %-25s %-25s %-5s%n", "ID", "FROM", "TO", "QUEUE");
+    out.println("-".repeat(95));
+    wires.forEach(w -> out.printf("%-35s %-25s %-25s %-5d%n",
+            w.wireId(), w.from(), w.to(), w.queueSize()));
+}
+
+출력 예시:
+  ID                                  FROM                      TO                        QUEUE
+  --------------------------------------------------------------------------------------------
+  timer.out-sensor.trigger            timer:out                 sensor:trigger            0
+  sensor.out-temp-rule.in             sensor:out                temp-rule:in              0
+  temp-rule.alert-alert.in            temp-rule:alert           alert:in                  0
+
+----------------------------------------------------------------
+== stats (엔진 전체) ==
+
+private void handleStats(PrintStream out) {
+    Runtime rt = Runtime.getRuntime();
+    long heapUsed  = (rt.totalMemory() - rt.freeMemory()) / (1024 * 1024);
+    long heapTotal = rt.totalMemory() / (1024 * 1024);
+
+    out.println("╔══════════════════════════════════════════╗");
+    out.println("║         FBP Engine Statistics            ║");
+    out.println("╠══════════════════════════════════════════╣");
+    out.printf( "║ Active Flows:  %-27d║%n", running);
+    out.printf( "║ Stopped Flows: %-27d║%n", stopped);
+    out.printf( "║ Total Nodes:   %-27d║%n", totalNodes);
+    out.printf( "║ Total Wires:   %-27d║%n", totalWires);
+    out.printf( "║ Total Msgs:    %-27s║%n", String.format("%,d", totalProcessed));
+    out.printf( "║ Total Errors:  %-27d║%n", totalErrors);
+    out.printf( "║ Heap Used:     %-27s║%n", heapUsed + " MB / " + heapTotal + " MB");
+    out.printf( "║ Threads:       %-27d║%n", Thread.activeCount());
+    out.printf( "║ Influx:        %-27s║%n", influxStatus);
+    out.println("╚══════════════════════════════════════════╝");
+}
+
+출력 예시:
+  ╔══════════════════════════════════════════╗
+  ║         FBP Engine Statistics            ║
+  ╠══════════════════════════════════════════╣
+  ║ Active Flows:  2                         ║
+  ║ Stopped Flows: 0                         ║
+  ║ Total Nodes:   8                         ║
+  ║ Total Wires:   5                         ║
+  ║ Total Msgs:    1,440                     ║
+  ║ Total Errors:  0                         ║
+  ║ Heap Used:     87 MB / 256 MB            ║
+  ║ Threads:       24                        ║
+  ║ Influx:        OK (3,250 pts)            ║
+  ╚══════════════════════════════════════════╝
+
+----------------------------------------------------------------
+== influx status ==
+
+private void handleInflux(String[] args, PrintStream out) {
+    out.println("InfluxDB: " + url + " (bucket=" + bucket + ")");
+    out.println("  Status:        " + (influxWriter.getTotalFailed() == 0 ? "OK" : "DEGRADED"));
+    out.printf( "  Batch Queue:   %d pending%n",  influxWriter.getLocalBufferSize());
+    out.printf( "  Total Written: %,d points%n",  influxWriter.getTotalWritten());
+    out.printf( "  Total Failed:  %d%n",           influxWriter.getTotalFailed());
+}
+
+출력 예시:
+  InfluxDB: http://localhost:8086 (bucket=fbp-metrics)
+    Status:        OK
+    Batch Queue:   0 pending
+    Total Written: 3,250 points
+    Total Failed:  0
+
+----------------------------------------------------------------
+== broker status ==
+
+private void handleBroker(String[] args, PrintStream out) {
+    List<FlowManager.BrokerInfo> brokers = flowManager.getBrokerInfos();
+    brokers.forEach(b -> {
+        out.println("System Broker: " + b.brokerUrl());
+        out.println("  Flow:          " + b.flowId());
+        out.println("  Active Wires:  " + b.wireCount());
+    });
+}
+
+FlowManager.getBrokerInfos():
+  return flows.values().stream()
+          .filter(f -> f.currentDefinition.getTransport().isMqtt())
+          .map(f -> new BrokerInfo(
+                  f.currentDefinition.getId(),
+                  f.currentDefinition.getTransport().getBroker(),
+                  f.wireRuntimes.size()))
+          .toList();
+
+출력 예시:
+  System Broker: tcp://localhost:1884
+    Flow:          smart-building
+    Active Wires:  3
+
+----------------------------------------------------------------
+== monitor flow / monitor node ==
+
+private void monitorFlow(String flowId, PrintStream out) throws InterruptedException {
+    out.println("Monitoring flow '" + flowId + "'... (Enter로 중단)");
+
+    // 폴링 스레드: 1초마다 MetricsSnapshot 출력
+    Thread poller = Thread.ofVirtual().start(() -> {
+        while (!Thread.currentThread().isInterrupted()) {
+            MetricsSnapshot snap = metricsCollector.getLastSnapshot();
+            out.println("─── " + Instant.now() + " ───");
+            snap.nodes().entrySet().stream()
+                    .filter(e -> e.getKey().startsWith(flowId + "|"))
+                    .forEach(e -> {
+                        String nodeId = e.getKey().split("\\|", 2)[1];
+                        MetricsSnapshot.NodeStatsSnapshot ns = e.getValue();
+                        out.printf("  %-20s  in=%,d  out=%,d  err=%d  avg=%.1fms%n",
+                                nodeId, ns.inCount(), ns.outCount(),
+                                ns.errors(), ns.avgMs());
+                    });
+            Thread.sleep(1000);
+        }
+    });
+
+    // 메인 스레드: Enter 입력 대기
+    new BufferedReader(new InputStreamReader(System.in)).readLine();
+    poller.interrupt();
+    poller.join(500);
+    out.println("모니터링 중단.");
+}
+
+실행 출력 예시:
+  fbp> monitor flow temp-sensor-local
+  Monitoring flow 'temp-sensor-local'... (Enter로 중단)
+  ─── 2026-05-08T03:12:00Z ───
+    timer                 in=60   out=0   err=0   avg=0.0ms
+    sensor                in=60   out=60  err=0   avg=0.1ms
+    temp-rule             in=60   out=42  err=0   avg=0.1ms
+    alert                 in=18   out=0   err=0   avg=0.1ms
+    normal-log            in=42   out=0   err=0   avg=0.1ms
+  (Enter 입력)
+  모니터링 중단.
+
+----------------------------------------------------------------
+== sensor stats (InfluxDB 직접 조회) ==
+
+private void sensorStats(String[] args, PrintStream out) {
+    String name   = args[2];
+    String window = argValue(args, "--window", "1h");
+    String range  = argValue(args, "--range",  "24h");
+
+    String measurement = "sensor_stats_" + window;
+    String flux = String.format("""
+            from(bucket: "%s")
+              |> range(start: -%s)
+              |> filter(fn: (r) => r._measurement == "%s" and r.sensor_name == "%s")
+              |> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value")
+              |> sort(columns: ["_time"])
+            """, influxConfig.bucket(), range, measurement, name);
+
+    // HTTP POST to /api/v2/query?org=fbp with Accept: application/csv
+    // CSV 응답 파싱: 헤더(1번 행) + 데이터(2번 행부터)
+}
+
+출력 예시:
+  fbp> sensor stats temperature --window 1m --range 1h
+  Sensor: temperature  (window=1m, range=1h)
+  TIME                          AVG      MIN      MAX    COUNT
+  ----------------------------------------------------------------
+  2026-05-08 03:00:00        28.40    21.50    38.10       30
+  2026-05-08 03:01:00        29.12    22.30    37.80       30
+
+----------------------------------------------------------------
+== flow patch / history / rollback ==
+
+fbp> flow patch temp-sensor-local flows/temp-sensor-v2.json
+변경 계산... (+1 노드, -0 노드)
+패치 완료. Revision: 3
+
+fbp> flow history temp-sensor-local
+REV  TIMESTAMP         OPERATION       DESCRIPTION
+------------------------------------------------------------
+1    May 08 03:00:01   add-wire        연결 추가: sensor.out-temp-rule.in
+2    May 08 03:05:20   update-config   노드 설정 변경: temp-rule
+3    May 08 03:10:45   patch           플로우 패치
+
+fbp> flow rollback temp-sensor-local 2
+롤백 완료 → revision 2
+
+----------------------------------------------------------------
+== 엔진 진입점 (Main.java) ==
+
+Main.java에서 MetricsCollector를 FlowManager보다 먼저 생성한다.
+(순서가 중요: FlowManager 생성자에 metricsCollector를 전달해야 함)
+
+public static void main(String[] args) {
+    NodeRegistry registry = buildRegistry();
+
+    InfluxWriterConfig influxConfig = buildInfluxConfig();
+    InfluxBatchWriter influxWriter = new InfluxBatchWriter(influxConfig);
+
+    MetricsCollector metricsCollector = new MetricsCollector(influxWriter);
+    metricsCollector.start();
+
+    FlowManager flowManager = new FlowManager(registry, metricsCollector);
+
+    FbpCli cli = new FbpCli(flowManager, registry, metricsCollector,
+                            influxWriter, influxConfig);
+    try {
+        cli.run(new InputStreamReader(System.in), System.out);
+    } finally {
+        metricsCollector.close();
+        influxWriter.close();
+    }
+}
+
+InfluxDB 접속 정보 (환경변수 오버라이드 가능, 기본값은 Docker 설정과 일치):
+  FBP_INFLUX_URL    = http://localhost:8086
+  FBP_INFLUX_TOKEN  = fbp-admin-token-please-change
+  FBP_INFLUX_ORG    = fbp
+  FBP_INFLUX_BUCKET = fbp-metrics
+
+----------------------------------------------------------------
+[ 로그 출력 분리 — logback.xml ]
+
+CLI 프롬프트와 로그가 섞이는 문제를 방지하기 위해 모든 로그를
+파일(fbp-engine.log)로만 출력한다.
+
+<configuration>
+  <appender name="FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
+    <file>fbp-engine.log</file>
+    <encoder>
+      <pattern>%d{HH:mm:ss.SSS} [%thread] %-5level %logger{36} -- %msg%n</pattern>
+    </encoder>
+  </appender>
+  <logger name="com.fbp.engine.metrics.MetricsCollector" level="WARN"/>
+  <root level="INFO"><appender-ref ref="FILE"/></root>
+</configuration>
+
+또한 AbstractNode.process()의 System.out.println 을 log.debug로 변경하여
+콘솔 출력을 제거했다.
+
+----------------------------------------------------------------
+[ 설계 결정 근거 ]
+
+Q. REST API 없이 FlowManager에 직접 접근한 이유?
+A. 단일 프로세스 CLI 환경이므로 REST API를 추가하면 불필요한 복잡성이
+   생긴다. FlowManager는 ConcurrentHashMap으로 스레드 안전하므로
+   CLI 스레드에서 직접 접근해도 안전하다.
+
+Q. monitor 명령에서 폴링 주기를 1초로 한 이유?
+A. MetricsCollector tick 주기가 10초이므로 1초 폴링으로는 tick 사이에는
+   동일한 스냅샷이 출력된다. tick 주기를 짧게 하면 InfluxDB 부하가 늘어나므로
+   현재는 "10초마다 갱신, 1초마다 출력"으로 절충했다.
+
+Q. sensor stats를 InfluxDB에서 직접 조회한 이유?
+A. in-memory 스냅샷(lastSnapshot)에는 윈도우 집계 결과가 없고 카운터만 있다.
+   시간별 통계(1m/1h/1d)는 InfluxDB에 저장된 sensor_stats_* measurement를
+   직접 Flux로 조회해야 정확한 히스토리를 볼 수 있다.

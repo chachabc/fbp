@@ -1,0 +1,429 @@
+================================================================
+Part G — 통합 시나리오
+================================================================
+
+[ 스펙 요구사항 ]
+
+1. 로컬/브릿지 혼합 환경에서 전체 시스템 정상 동작 확인
+2. 동적 플로우 변경이 무중단으로 적용됨을 확인
+3. 모든 통계가 InfluxDB에 누적되며 Grafana 등에서 조회 가능함을 확인
+4. CLI를 통한 전체 운영 시나리오 시연
+
+스펙 시나리오 구성:
+  Flow-1 (MQTT 브릿지): smart-building
+    MqttSubscriber → ThresholdFilterNode → AlertNode / LogNode
+  Flow-2 (로컬): health-check
+    TimerNode → CounterNode → LogNode
+
+----------------------------------------------------------------
+[ 환경 구성 ]
+
+Docker Compose로 4개 서비스를 실행한다.
+
+== docker/docker-compose.yml ==
+
+services:
+  mqtt-data-broker:          # IoT 센서 데이터 수집용 (1883)
+    image: eclipse-mosquitto:2.0
+    container_name: fbp-data-broker
+    ports: ["1883:1883"]
+
+  mqtt-system-broker:        # FBP 엔진 내부 노드 간 메시지 전달용 (1884)
+    image: eclipse-mosquitto:2.0
+    container_name: fbp-system-broker
+    ports: ["1884:1883"]
+
+  influxdb:                  # 시계열 메트릭/도메인 통계 저장 (8086)
+    image: influxdb:2.7
+    container_name: fbp-influxdb
+    ports: ["8086:8086"]
+    environment:
+      DOCKER_INFLUXDB_INIT_ORG:    fbp
+      DOCKER_INFLUXDB_INIT_BUCKET: fbp-metrics
+      DOCKER_INFLUXDB_INIT_ADMIN_TOKEN: fbp-admin-token-please-change
+      DOCKER_INFLUXDB_INIT_RETENTION:   30d
+
+  grafana:                   # InfluxDB 시계열 데이터 시각화 (3000)
+    image: grafana/grafana:10.4.0
+    container_name: fbp-grafana
+    ports: ["3000:3000"]
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning
+      - ./grafana/dashboards:/var/lib/grafana/dashboards
+
+실행:
+  cd docker && docker compose up -d
+
+접속:
+  InfluxDB UI: http://localhost:8086  (admin / admin12345)
+  Grafana:     http://localhost:3000  (admin / admin)
+
+----------------------------------------------------------------
+[ 플로우 정의 파일 ]
+
+== flows/health-check.json (로컬 플로우) ==
+
+{
+  "id": "health-check",
+  "transport": { "type": "local" },
+  "nodes": [
+    {"id": "timer",   "type": "TimerNode",   "config": {"intervalMs": 5000}},
+    {"id": "counter", "type": "CounterNode", "config": {}},
+    {"id": "logger",  "type": "LogNode",     "config": {}}
+  ],
+  "connections": [
+    {"from": "timer:out",   "to": "counter:in"},
+    {"from": "counter:out", "to": "logger:in"}
+  ]
+}
+
+역할: 5초마다 TimerNode가 트리거 → CounterNode가 카운트 누적 →
+     LogNode가 로그 출력. 엔진이 살아있는지 확인하는 헬스체크 플로우.
+
+== flows/smart-building.json (MQTT 브릿지 플로우) ==
+
+{
+  "id": "smart-building",
+  "transport": {
+    "type": "mqtt",
+    "broker": "tcp://localhost:1884",   ← 시스템 브로커 (노드 간 FBP 메시지)
+    "qos": 1
+  },
+  "metrics": {
+    "domain": [
+      {
+        "name": "temperature",
+        "source": { "node": "temp-sensor", "port": "out" },
+        "field": "value",
+        "windows": ["1m", "1h", "1d"]
+      }
+    ]
+  },
+  "nodes": [
+    {
+      "id": "temp-sensor",
+      "type": "MqttSubscriberNode",
+      "config": {
+        "brokerUrl": "tcp://localhost:1883",  ← 데이터 브로커 (IoT 센서 데이터)
+        "topic":     "sensor/temp",
+        "qos":       1
+      }
+    },
+    {"id": "temp-rule",   "type": "ThresholdFilterNode",
+     "config": {"fieldName": "value", "threshold": 30.0}},
+    {"id": "alert",       "type": "AlertNode",  "config": {}},
+    {"id": "normal-log",  "type": "LogNode",    "config": {}}
+  ],
+  "connections": [
+    {"from": "temp-sensor:out", "to": "temp-rule:in"    },
+    {"from": "temp-rule:alert", "to": "alert:in"        },
+    {"from": "temp-rule:normal","to": "normal-log:in"   }
+  ]
+}
+
+역할: 데이터 브로커(1883)의 sensor/temp 토픽에서 온도 데이터를 수신
+     → 30도 초과 시 AlertNode 발동, 이하는 LogNode 출력.
+     노드 간 메시지는 시스템 브로커(1884)를 경유.
+
+== flows/temp-sensor-local.json (TemperatureSensorNode 기반 로컬 플로우) ==
+
+{
+  "id": "temp-sensor-local",
+  "transport": { "type": "local" },
+  "metrics": {
+    "domain": [
+      {
+        "name": "temperature",
+        "source": { "node": "sensor", "port": "out" },
+        "field": "temperature",   ← TemperatureSensorNode payload 필드명
+        "windows": ["1m", "1h"]
+      }
+    ]
+  },
+  "nodes": [
+    {"id": "timer",     "type": "TimerNode",
+     "config": {"intervalMs": 2000}},
+    {"id": "sensor",    "type": "TemperatureSensorNode",
+     "config": {"min": 20.0, "max": 40.0}},
+    {"id": "temp-rule", "type": "ThresholdFilterNode",
+     "config": {"fieldName": "temperature", "threshold": 30.0}},
+    {"id": "alert",     "type": "AlertNode",  "config": {}},
+    {"id": "normal-log","type": "LogNode",    "config": {}}
+  ],
+  "connections": [
+    {"from": "timer:out",      "to": "sensor:trigger"},
+    {"from": "sensor:out",     "to": "temp-rule:in"  },
+    {"from": "temp-rule:alert","to": "alert:in"      },
+    {"from": "temp-rule:normal","to": "normal-log:in"}
+  ]
+}
+
+역할: 2초마다 내부적으로 랜덤 온도를 생성(20-40°C)하여 임계값(30°C) 기준으로
+     경보/정상 로그를 출력. MQTT 없이 순수 Java로 온도 데이터를 생성하므로
+     docker 없이도 InfluxDB 메트릭을 확인할 수 있다.
+
+----------------------------------------------------------------
+[ CLI 운영 시나리오 전체 실행 흐름 ]
+
+## 1. 엔진 상태 확인 ##
+
+fbp> stats
+  ╔══════════════════════════════════════════╗
+  ║         FBP Engine Statistics            ║
+  ╠══════════════════════════════════════════╣
+  ║ Active Flows:  0                         ║
+  ║ Stopped Flows: 0                         ║
+  ║ Total Nodes:   0                         ║
+  ║ Total Wires:   0                         ║
+  ║ Heap Used:     42 MB / 256 MB            ║
+  ╚══════════════════════════════════════════╝
+
+fbp> influx status
+  InfluxDB: http://localhost:8086 (bucket=fbp-metrics)
+    Status:        OK
+    Total Written: 0 points
+    Total Failed:  0
+
+## 2. 로컬 플로우 배포 및 시작 ##
+
+fbp> flow deploy flows/health-check.json
+  배포 완료: health-check (노드=3, 연결=2)
+
+fbp> flow start health-check
+  시작 완료.
+
+fbp> flow deploy flows/temp-sensor-local.json
+  배포 완료: temp-sensor-local (노드=5, 연결=4)
+
+fbp> flow start temp-sensor-local
+  시작 완료.
+
+## 3. 플로우 목록 확인 ##
+
+fbp> flow list
+  ID                             STATUS     TRANSPORT  NODES  WIRES
+  -----------------------------------------------------------------
+  health-check                   RUNNING    local      3      2
+  temp-sensor-local              RUNNING    local      5      4
+
+## 4. MQTT 브릿지 플로우 배포 ##
+
+fbp> flow deploy flows/smart-building.json
+  배포 완료: smart-building (노드=4, 연결=3)
+
+fbp> flow start smart-building
+  시작 완료.
+
+fbp> flow list
+  ID                             STATUS     TRANSPORT  NODES  WIRES
+  -----------------------------------------------------------------
+  health-check                   RUNNING    local      3      2
+  temp-sensor-local              RUNNING    local      5      4
+  smart-building                 RUNNING    mqtt       4      3
+
+## 5. 와이어 목록 확인 ##
+
+fbp> wire list smart-building
+  ID                                  FROM                      TO                        QUEUE
+  --------------------------------------------------------------------------------------------
+  temp-sensor.out-temp-rule.in        temp-sensor:out           temp-rule:in              0
+  temp-rule.alert-alert.in            temp-rule:alert           alert:in                  0
+  temp-rule.normal-normal-log.in      temp-rule:normal          normal-log:in             0
+
+## 6. MQTT 브로커 상태 확인 ##
+
+fbp> broker status
+  System Broker: tcp://localhost:1884
+    Flow:          smart-building
+    Active Wires:  3
+
+## 7. MQTT 데이터 발행 (다른 터미널에서) ##
+
+  docker exec fbp-data-broker mosquitto_pub \
+    -h localhost -p 1883 -t sensor/temp \
+    -m '{"value":35.2,"unit":"celsius"}'
+
+  → temp-rule가 35.2 > 30.0 판정 → AlertNode 트리거
+    fbp-engine.log에: [smart-building][alert] ALERT: ...
+
+  docker exec fbp-data-broker mosquitto_pub \
+    -h localhost -p 1883 -t sensor/temp \
+    -m '{"value":22.1,"unit":"celsius"}'
+
+  → temp-rule가 22.1 < 30.0 판정 → normal-log에 출력
+
+## 8. 실시간 모니터링 ##
+
+fbp> monitor flow temp-sensor-local
+  Monitoring flow 'temp-sensor-local'... (Enter로 중단)
+  ─── 2026-05-08T03:20:00Z ───
+    timer                 in=60   out=0   err=0   avg=0.0ms
+    sensor                in=60   out=60  err=0   avg=0.1ms
+    temp-rule             in=60   out=42  err=0   avg=0.1ms
+    alert                 in=18   out=0   err=0   avg=0.1ms
+    normal-log            in=42   out=0   err=0   avg=0.1ms
+  (Enter)
+  모니터링 중단.
+
+fbp> monitor node temp-sensor-local sensor
+  Monitoring node 'temp-sensor-local/sensor'... (Enter로 중단)
+  [03:20:10]  in=60  out=60  err=0  avg=0.08ms  p99=0.45ms
+  [03:20:11]  in=62  out=62  err=0  avg=0.08ms  p99=0.45ms
+  (Enter)
+  모니터링 중단.
+
+## 9. 노드 통계 조회 ##
+
+fbp> node stats temp-sensor-local sensor
+  Node: sensor
+    In:       120 msg
+    Out:      120 msg
+    Errors:   0
+    Avg Time: 0.08 ms
+    P99 Time: 0.45 ms
+
+## 10. 도메인 통계 목록 ##
+
+fbp> sensor list
+  SENSOR               FLOW                 FIELD      WINDOWS
+  ------------------------------------------------------------------------------
+  temperature          temp-sensor-local    temperature  [1m, 1h]
+  temperature          smart-building       value        [1m, 1h, 1d]
+
+## 11. 도메인 통계 조회 (InfluxDB에서) ##
+
+fbp> sensor stats temperature --window 1m --range 1h
+  Sensor: temperature  (window=1m, range=1h)
+  TIME                          AVG      MIN      MAX    COUNT
+  ----------------------------------------------------------------
+  2026-05-08 03:00:00        28.40    21.50    38.10       30
+  2026-05-08 03:01:00        29.12    22.30    37.80       30
+
+## 12. InfluxDB 적재 확인 ##
+
+fbp> influx status
+  InfluxDB: http://localhost:8086 (bucket=fbp-metrics)
+    Status:        OK
+    Batch Queue:   0 pending
+    Total Written: 3,250 points
+    Total Failed:  0
+
+## 13. 동적 변경 — 노드 추가 ##
+
+fbp> flow add-node temp-sensor-local '{"id":"file-writer","type":"FileWriterNode","config":{"filePath":"/tmp/fbp-temp.log"}}'
+  노드 추가 완료: file-writer
+
+fbp> flow add-wire temp-sensor-local temp-rule:normal file-writer:in
+  연결 추가 완료: temp-rule:normal → file-writer:in
+
+fbp> flow history temp-sensor-local
+  REV  TIMESTAMP         OPERATION       DESCRIPTION
+  ------------------------------------------------------------
+  1    May 08 03:20:00   add-node        노드 추가: file-writer
+  2    May 08 03:20:05   add-wire        연결 추가: temp-rule.normal-file-writer.in
+
+## 14. 롤백 (file-writer 추가 전으로) ##
+
+fbp> flow rollback temp-sensor-local 0
+  [error] 이력 없음: revision=0
+
+  → revision은 1부터 시작. 초기 배포 상태로 되돌리려면 patch를 사용한다.
+
+## 15. 플로우 제어 ##
+
+fbp> flow stop smart-building
+  정지 완료.
+
+fbp> flow status smart-building
+  Flow: smart-building
+    Status:    STOPPED
+    Transport: mqtt
+    Nodes:     4
+    Wires:     3
+    Uptime:    -
+
+fbp> flow restart smart-building
+  재시작 완료.
+
+## 16. 정리 ##
+
+fbp> flow remove health-check
+  삭제 완료.
+
+fbp> flow remove smart-building
+  삭제 완료.
+
+fbp> flow remove temp-sensor-local
+  삭제 완료.
+
+fbp> exit
+  Bye.
+
+----------------------------------------------------------------
+[ Grafana 대시보드 확인 ]
+
+http://localhost:3000 → FBP Engine 대시보드
+
+패널 구성:
+  1. Node — Messages In/Out:  노드별 in_count/out_count 시계열 차트
+  2. Node — Avg Processing Time: 노드별 avg_time_ms 시계열 차트
+  3. Wire — Delivered Messages:  와이어별 delivered 카운트
+  4. Wire — Queue Size:         와이어별 queue_size 게이지
+  5. Sensor — Temperature (1m avg): sensor_stats_1m의 avg/min/max
+
+Grafana 프로비저닝:
+  - datasource: influxdb.yml (uid=influxdb-fbp, Flux 모드)
+  - dashboard:  fbp-engine.json (파일 기반 자동 등록)
+  주의: 파일 프로비저닝에서 ${DS_INFLUXDB-FBP}는 해석되지 않으므로
+        datasource 참조를 uid 문자열 "influxdb-fbp"로 하드코딩
+
+----------------------------------------------------------------
+[ 발견 및 수정한 주요 문제들 ]
+
+1. TemperatureSensorNode payload 필드명 불일치
+   문제: ThresholdFilterNode config에 fieldName: "value"로 설정했으나
+         TemperatureSensorNode는 payload에 "temperature" 키를 사용.
+   수정: fieldName과 domain metrics field를 "temperature"로 변경.
+
+2. MQTT keepAlive 타임아웃
+   문제: 유휴 와이어(메시지 없는 시간이 60초 초과)에서
+         "Timed out as no activity" 오류 발생 후 연결 끊김.
+   수정: MqttConnectionOptions.setKeepAliveInterval(300) — 5분으로 연장.
+
+3. MetricsCollector tick 로그가 CLI 프롬프트 간섭
+   문제: AbstractNode.process()의 System.out.println이 콘솔 출력.
+   수정: log.debug로 변경 + logback.xml로 모든 로그를 파일로만 출력.
+
+4. MetricsCollector written: 0
+   문제: FlowManager가 단일 인자 생성자로 생성되어 metricsCollector=null.
+   수정: Main.java에서 MetricsCollector 먼저 생성 후
+         new FlowManager(registry, metricsCollector)로 전달.
+
+5. InfluxDB "organization not found"
+   문제: 구 org(iot-lab) 자격증명 사용.
+   수정: buildInfluxConfig()에서 기본값을 fbp/fbp-admin-token-please-change로 통일.
+
+6. Grafana datasource not found
+   문제: dashboard JSON에 ${DS_INFLUXDB-FBP} 변수를 사용했으나
+         파일 프로비저닝에서는 변수 치환이 지원되지 않음.
+   수정: datasource.yml에 uid: influxdb-fbp 명시,
+         dashboard JSON 전체에서 "${DS_INFLUXDB-FBP}" → "influxdb-fbp"로 교체.
+
+----------------------------------------------------------------
+[ 통합 시나리오 검증 결과 ]
+
+항목                          결과     비고
+────────────────────────────────────────────────────────────
+로컬 플로우 동작               OK      health-check, temp-sensor-local
+MQTT 브릿지 플로우 동작        OK      smart-building (시스템 브로커 경유)
+로컬/브릿지 플로우 공존        OK      동일 FlowManager에서 동시 실행
+InfluxDB 적재                 OK      node_stats, wire_stats, sensor_stats_1m
+Grafana 대시보드               OK      5개 패널 실시간 데이터 표시
+동적 노드 추가                 OK      flow add-node 명령
+동적 와이어 추가/제거           OK      flow add-wire / remove-wire 명령
+플로우 패치                    OK      flow patch 명령 (diff 기반)
+변경 이력 조회                 OK      flow history 명령
+실시간 모니터링                OK      monitor flow / monitor node
+도메인 통계 조회               OK      sensor stats (InfluxDB Flux 조회)
+브로커 상태 확인               OK      broker status 명령
+전체 테스트 (268개)            OK      mvn test (InfluxDB 통합 포함)

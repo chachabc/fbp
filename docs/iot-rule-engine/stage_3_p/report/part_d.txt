@@ -1,0 +1,337 @@
+================================================================
+Part D — 통계 수집 (MetricsCollector)
+================================================================
+
+[ 스펙 요구사항 ]
+
+네 계층의 메트릭을 실시간으로 수집한다:
+
+1. 플로우 계층: 처리 메시지 수, 에러 수
+2. 노드 계층: 입력/출력 메시지 수, 처리 시간(avg/p99), 에러 수
+3. 연결(Wire) 계층: 전달 건수, 큐 적체량, 드롭 수, 페이로드 바이트
+4. 도메인(센서) 계층: 페이로드 필드 추출 → 시간 윈도우별 avg/min/max
+
+핵심 제약:
+  - Hot path(메시지 처리 경로)는 블로킹 없음
+  - 메트릭 이벤트는 lock-free 큐에 던지고 즉시 반환
+  - Cold path(집계/적재)는 전용 drain 스레드가 처리
+
+수집 주기:
+  - flow/node/wire 통계: 10초마다 PointSink(InfluxDB)에 발행
+  - 도메인 1m 버킷: 1분마다 flush → sensor_stats_1m
+  - 도메인 1h 버킷: 1시간마다 flush → sensor_stats_1h
+  - 도메인 1d 버킷: 1일마다 flush → sensor_stats_1d
+
+----------------------------------------------------------------
+[ 구현 접근법 ]
+
+work queue(ArrayBlockingQueue)를 사용하여 Hot path와 Cold path를 분리:
+  - record(): workQueue.offer(Runnable) — 즉시 반환, 블로킹 없음
+  - drainThread: workQueue.poll()로 소비 → 집계 자료구조 갱신
+  - scheduler: 주기적으로 tick/closeWindows Runnable을 enqueue
+
+큐가 가득 차면 이벤트를 드롭하고 droppedEventCount를 증가시킨다.
+(메시지 처리는 절대 블로킹하지 않는다)
+
+카운터는 LongAdder(락 없는, 멀티스레드 경합 분산),
+처리 시간은 HdrHistogram(백분위수 근사, O(1) 기록, 메모리 한정).
+
+----------------------------------------------------------------
+[ 구현 코드 ]
+
+== MetricsCollector.java — 전체 구조 ==
+
+public class MetricsCollector implements AutoCloseable {
+
+    // Hot path용 work queue
+    private final BlockingQueue<Runnable> workQueue = new ArrayBlockingQueue<>(65536);
+    private final LongAdder droppedEventCount = new LongAdder();
+
+    // 집계 자료구조 (drain thread 전용 — 별도 동기화 없음)
+    private final Map<String, NodeStats>  nodeStatsMap  = new HashMap<>(); // key: flowId|nodeId
+    private final Map<String, WireStats>  wireStatsMap  = new HashMap<>(); // key: wireId
+    private final Map<String, FlowStats>  flowStatsMap  = new HashMap<>(); // key: flowId
+    private final Map<String, WireSource> wireSourceMap = new HashMap<>(); // wireId → source
+    private final Map<String, List<DomainMetricDefinition>> domainDefsByFlow = new HashMap<>();
+    private final Map<String, TumblingBucket> buckets   = new HashMap<>(); // flowId|name|window
+
+    private final PointSink sink;          // InfluxBatchWriter
+    private volatile MetricsSnapshot lastSnapshot = MetricsSnapshot.EMPTY;
+}
+
+----------------------------------------------------------------
+== Hot path: enqueue ==
+
+private void enqueue(Runnable work) {
+    if (!workQueue.offer(work)) {
+        droppedEventCount.increment();  // 큐 가득 참 → 드롭, 메시지 처리는 계속
+    }
+}
+
+public void record(MetricEvent event) {
+    enqueue(() -> dispatch(event));  // 즉시 반환
+}
+
+----------------------------------------------------------------
+== Cold path: drain loop ==
+
+private void drainLoop() {
+    while (running) {
+        try {
+            Runnable work = workQueue.poll(100, TimeUnit.MILLISECONDS);
+            if (work != null) work.run();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+    }
+    // 종료 시 남은 항목 처리
+    Runnable work;
+    while ((work = workQueue.poll()) != null) {
+        work.run();
+    }
+}
+
+----------------------------------------------------------------
+== 노드 이벤트 처리 ==
+
+private void processNode(NodeMetricEvent e) {
+    NodeStats ns = nodeStatsMap.computeIfAbsent(e.flowId() + "|" + e.nodeId(),
+                                                 k -> new NodeStats());
+    ns.inCount.increment();
+    if (e.hadError()) ns.errors.increment();
+    ns.histogram.recordValue(Math.min(e.processingTimeNs(), MAX_PROC_TIME_NS));
+
+    FlowStats fs = flowStatsMap.computeIfAbsent(e.flowId(), k -> new FlowStats());
+    fs.processed.increment();
+    if (e.hadError()) fs.errors.increment();
+}
+
+// NodeMetricEvent는 FlowManager.NodeRunner에서 생성:
+// collector.record(new NodeMetricEvent(flowId, node.getId(),
+//         System.nanoTime() - t0, hadError));
+
+----------------------------------------------------------------
+== 와이어 이벤트 처리 ==
+
+private void processWire(WireMetricEvent e) {
+    WireStats ws = wireStatsMap.computeIfAbsent(e.wireId(), k -> new WireStats());
+    ws.delivered.increment();
+    ws.payloadBytes.add(e.payloadBytes());
+    ws.queueSize.set(e.queueSize());
+    if (e.dropped()) ws.dropped.increment();
+
+    WireSource src = wireSourceMap.get(e.wireId());
+    if (src != null) {
+        // source 노드의 outCount 증가
+        NodeStats ns = nodeStatsMap.computeIfAbsent(
+                src.flowId() + "|" + src.sourceNodeId(), k -> new NodeStats());
+        ns.outCount.increment();
+
+        // 도메인 메트릭 추출 시도
+        if (e.message() != null) {
+            extractDomainMetrics(src, e.message());
+        }
+    }
+}
+
+// WireMetricEvent는 LocalConnection/MqttBridgeConnection에서 생성:
+// collector.record(new WireMetricEvent(flowId, id, payloadBytes,
+//         queueSize, dropped, message));
+
+----------------------------------------------------------------
+== 도메인 메트릭 추출 ==
+
+private void extractDomainMetrics(WireSource src, Message message) {
+    List<DomainMetricDefinition> defs = domainDefsByFlow.get(src.flowId());
+    if (defs == null) return;
+
+    for (DomainMetricDefinition def : defs) {
+        // source 노드/포트가 일치하는 정의만 처리
+        if (!def.sourceNodeId().equals(src.sourceNodeId())) continue;
+        if (!def.sourcePort().equals(src.sourcePort())) continue;
+
+        Object raw = message.get(def.field());  // 예: "temperature" 필드 값
+        if (!(raw instanceof Number num)) continue;
+        double value = num.doubleValue();
+
+        for (String window : def.windows()) {  // ["1m", "1h", "1d"]
+            String key = src.flowId() + "|" + def.name() + "|" + window;
+            TumblingBucket bucket = buckets.computeIfAbsent(
+                    key, k -> new TumblingBucket(windowMs(window)));
+            bucket.record(value);
+        }
+    }
+}
+
+----------------------------------------------------------------
+== Tumbling Bucket (텀블링 윈도우) ==
+
+static class TumblingBucket {
+    private double sum  = 0.0;
+    private double min  = Double.MAX_VALUE;
+    private double max  = -Double.MAX_VALUE;
+    private long   count = 0;
+    private final long durationMs;
+    private long windowStartMs = System.currentTimeMillis();
+
+    void record(double value) {
+        sum += value;
+        if (value < min) min = value;
+        if (value > max) max = value;
+        count++;
+    }
+
+    boolean shouldClose(long nowMs) { return nowMs >= windowStartMs + durationMs; }
+
+    MetricPoint closeAndReset(String measurement, Map<String, String> tags) {
+        MetricPoint point = null;
+        if (count > 0) {
+            point = new MetricPoint(
+                    measurement,
+                    tags,
+                    Map.of("avg", sum/count, "min", min, "max", max, "count", count),
+                    MetricPoint.nowNs()
+            );
+        }
+        // 버킷 리셋
+        sum = 0.0; min = Double.MAX_VALUE; max = -Double.MAX_VALUE; count = 0;
+        windowStartMs = System.currentTimeMillis();
+        return point;
+    }
+}
+
+----------------------------------------------------------------
+== tick() — 10초마다 InfluxDB에 스냅샷 발행 ==
+
+private void tick() {
+    long tsNs = MetricPoint.nowNs();
+
+    nodeStatsMap.forEach((key, ns) -> {
+        String[] parts = key.split("\\|", 2);
+        String flowId = parts[0], nodeId = parts[1];
+        long p99Ns  = ns.histogram.getTotalCount() > 0
+                    ? ns.histogram.getValueAtPercentile(99.0) : 0L;
+        double avgMs = ns.histogram.getTotalCount() > 0
+                    ? ns.histogram.getMean() / 1_000_000.0 : 0.0;
+        ns.histogram.reset();
+
+        sink.accept(new MetricPoint(
+                "node_stats",
+                Map.of("flow_id", flowId, "node_id", nodeId),
+                Map.of("in_count",    ns.inCount.sum(),
+                       "out_count",   ns.outCount.sum(),
+                       "errors",      ns.errors.sum(),
+                       "avg_time_ms", avgMs,
+                       "p99_time_ms", p99Ns / 1_000_000.0),
+                tsNs
+        ));
+    });
+
+    wireStatsMap.forEach((wireId, ws) -> {
+        // wire_stats measurement 발행
+        sink.accept(new MetricPoint("wire_stats", ...));
+    });
+
+    flowStatsMap.forEach((flowId, fs) -> {
+        // flow_stats measurement 발행
+        sink.accept(new MetricPoint("flow_stats", ...));
+    });
+
+    // CLI가 읽을 수 있도록 MetricsSnapshot 갱신
+    lastSnapshot = new MetricsSnapshot(nodeSnap, wireSnap, flowSnap);
+}
+
+----------------------------------------------------------------
+== 스케줄러 설정 ==
+
+public void start() {
+    drainThread = Thread.ofVirtual().name("fbp-metrics-drain").start(this::drainLoop);
+
+    scheduler = Executors.newSingleThreadScheduledExecutor(...);
+
+    // 10초마다 tick enqueue
+    scheduler.scheduleAtFixedRate(
+            () -> enqueue(this::tick),
+            tickIntervalMs, tickIntervalMs, TimeUnit.MILLISECONDS);
+
+    // 1분마다 1m 버킷 close
+    scheduler.scheduleAtFixedRate(
+            () -> enqueue(() -> closeWindows(60_000L, "1m")),
+            60_000, 60_000, TimeUnit.MILLISECONDS);
+
+    // 1시간마다 1h 버킷 close
+    scheduler.scheduleAtFixedRate(
+            () -> enqueue(() -> closeWindows(3_600_000L, "1h")),
+            3_600_000, 3_600_000, TimeUnit.MILLISECONDS);
+
+    // 1일마다 1d 버킷 close
+    scheduler.scheduleAtFixedRate(
+            () -> enqueue(() -> closeWindows(86_400_000L, "1d")),
+            86_400_000, 86_400_000, TimeUnit.MILLISECONDS);
+}
+
+----------------------------------------------------------------
+== 내부 자료구조 ==
+
+static class NodeStats {
+    final LongAdder inCount  = new LongAdder();   // 락 없는 카운터
+    final LongAdder outCount = new LongAdder();
+    final LongAdder errors   = new LongAdder();
+    final Histogram histogram = new Histogram(MAX_PROC_TIME_NS, 3);  // HdrHistogram
+    double lastAvgMs = 0.0;
+    double lastP99Ms = 0.0;
+}
+
+static class WireStats {
+    final LongAdder  delivered    = new LongAdder();
+    final LongAdder  payloadBytes = new LongAdder();
+    final AtomicLong queueSize    = new AtomicLong(); // 게이지 (최신값)
+    final LongAdder  dropped      = new LongAdder();
+}
+
+static class FlowStats {
+    final LongAdder processed = new LongAdder();
+    final LongAdder errors    = new LongAdder();
+}
+
+----------------------------------------------------------------
+== 도메인 메트릭 등록 (플로우 정의 JSON) ==
+
+플로우 정의에서 domain 섹션:
+{
+  "metrics": {
+    "domain": [
+      {
+        "name": "temperature",
+        "source": { "node": "sensor", "port": "out" },
+        "field": "temperature",   ← Message 페이로드에서 꺼낼 필드명
+        "windows": ["1m", "1h"]
+      }
+    ]
+  }
+}
+
+주의: TemperatureSensorNode는 payload에 "temperature" 키로 값을 넣는다.
+  {sensorId: ..., temperature: 32.5, unit: "celsius", timestamp: ...}
+  따라서 field를 "value"가 아닌 "temperature"로 지정해야 한다.
+
+----------------------------------------------------------------
+[ 설계 결정 근거 ]
+
+Q. LongAdder를 AtomicLong 대신 사용한 이유?
+A. LongAdder는 스트라이프 배열로 경합을 분산하여 고처리량 환경에서
+   AtomicLong보다 write 성능이 우수하다.
+
+Q. HdrHistogram을 사용한 이유?
+A. 백분위수(p99) 정확한 계산은 모든 샘플을 저장해야 하지만 메모리를
+   많이 쓴다. HdrHistogram은 고범위 정수를 고정 메모리로 근사하여
+   O(1)로 기록하고 O(1)로 백분위수를 조회한다.
+
+Q. tick 주기(10초)를 스펙대로 유지한 이유?
+A. InfluxDB 쓰기는 배치로 이루어지므로 너무 짧으면 불필요한 HTTP 호출이
+   많아진다. 10초는 "준실시간" 관찰에 충분한 해상도이다.
+
+Q. drainThread를 가상 스레드로 생성한 이유?
+A. 가상 스레드는 블로킹 I/O에도 OS 스레드를 점유하지 않는다.
+   drainThread가 workQueue.poll()에서 100ms 블로킹해도 플랫폼 스레드
+   소비 없이 효율적으로 동작한다.

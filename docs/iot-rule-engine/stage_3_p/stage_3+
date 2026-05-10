@@ -1,0 +1,98 @@
+  핵심 원칙: 노드는 아무것도 모른다. 노드 간 메시지가 BlockingQueue로 가든 MQTT 브로커로 가든 노드는 모른다. 전송 방식은 Connection 인터페이스 뒤에 숨는다.
+
+  ┌──────┬──────────────────────────────────────────────────────────────────────────────────────┐
+  │ Part │                                         내용                                         │
+  ├──────┼──────────────────────────────────────────────────────────────────────────────────────┤
+  │ A    │ Connection을 인터페이스로 추상화 + MqttBridgeConnection 구현 (노드 간 전송을 MQTT로) │
+  ├──────┼──────────────────────────────────────────────────────────────────────────────────────┤
+  │ B    │ FlowManager — JSON 정의 파싱, 노드 생성, 연결 타입 선택 (Local/Bridge)               │
+  ├──────┼──────────────────────────────────────────────────────────────────────────────────────┤
+  │ C    │ 동적 플로우 관리 — 엔진 멈추지 않고 노드/연결 추가·제거·패치·롤백                    │
+  ├──────┼──────────────────────────────────────────────────────────────────────────────────────┤
+  │ D    │ 다층 메트릭 수집 — 플로우/노드/연결/도메인(센서값) 4계층                             │
+  ├──────┼──────────────────────────────────────────────────────────────────────────────────────┤
+  │ E    │ InfluxDB 연동 — 배치 쓰기, 장애 시 로컬 버퍼링, 보존 정책                            │
+  ├──────┼──────────────────────────────────────────────────────────────────────────────────────┤
+  │ F    │ CLI — flow/node/wire/sensor/stats 전체 명령어                                        │
+  ├──────┼──────────────────────────────────────────────────────────────────────────────────────┤
+  │ G    │ 통합 시나리오 (스마트 빌딩)                                                          │
+  ├──────┼──────────────────────────────────────────────────────────────────────────────────────┤
+  │ H    │ (도전) 다중 엔진 분산 플로우                                                         │
+  └──────┴──────────────────────────────────────────────────────────────────────────────────────┘
+
+  인프라는 Docker Compose로 데이터 브로커(1883) + 시스템 브로커(1884) + InfluxDB(8086).
+
+  ---
+    구현 순서
+
+  1. [Part A-1] Connection 인터페이스 + LocalConnection
+     → 기반이 되는 추상화. 기존 테스트가 그대로 통과해야 한다.
+
+  2. [Part A-2] MessageSerializer (JSON) + MqttClientPool + MqttBridgeConnection
+     → 시스템 브로커를 통한 노드 간 전달.
+
+  3. [Part B-1] NodeRegistry + NodeFactory
+     → 타입 이름 → 노드 인스턴스 생성.
+
+  4. [Part B-2] FlowDefinition / JsonFlowParser
+     → JSON → FlowDefinition 변환 (노드 목록 + 연결 목록).
+
+  5. [Part B-3] BridgeConnectionFactory + FlowManager (deploy/start/stop/remove)
+     → transport 섹션을 읽어 Local / Bridge Connection 선택.
+
+  6. [Part D] MetricsCollector (LongAdder, lock-free 큐, DomainMetricsExtractor)
+     → Hot Path는 절대 블로킹하지 않는 비동기 메트릭 수집.
+
+     새로 셍성한 파일:
+      - MetricEvent — sealed interface (NodeMetricEvent | WireMetricEvent)
+      - NodeMetricEvent — 노드 처리시간/에러 이벤트 record
+      - MetricPoint — InfluxDB에 적재할 데이터 포인트 record
+      - PointSink — @FunctionalInterface (Part E의 BatchWriter가 구현)
+      - DomainMetricDefinition — 플로우 JSON metrics.domain 항목 record
+      - MetricsCollector — 전체 집계 엔진 (work queue 기반 single-drain-thread, HdrHistogram p99, TumblingBucket)
+
+      수정한 파일:
+      - pom.xml — HdrHistogram 2.2.2 추가
+      - JsonFlowParser — metrics.domain 배열 파싱 추가
+      - LocalConnection — MetricsCollector 주입, deliver() 에서 WireMetricEvent 기록
+      - MqttBridgeConnection — 동일, 직렬화 바이트 수 포함
+      - FlowManager — MetricsCollector 생성자 주입, NodeRunner에 전달, wire/flow 등록/해제
+
+  7. [Part E] InfluxDB BatchWriter + LocalBuffer
+     → 메트릭 → Line Protocol → 배치 전송.
+
+    새로 생성한 파일 (com.fbp.engine.influx):
+      - InfluxWriterConfig — url/token/org/bucket/batchSize/flushInterval/retry/buffer 설정 record
+      - LineProtocolEncoder — MetricPoint → InfluxDB line protocol 변환 (타입별 인코딩, 태그 정렬, 이스케이프)
+      - LocalBuffer — 전송 실패 시 인코딩된 라인을 보관하는 인메모리 FIFO 버퍼 (maxSize 초과 시 오래된 것부터 폐기)
+      - InfluxBatchWriter — PointSink 구현체. accept()는 non-blocking, writerThread가 배치 구성 후 HTTP POST(gzip), 지수 backoff 재시도, LocalBuffer 관리를 단독
+      처리
+
+      설계 결정:
+      - InfluxBatchWriter.accept()는 pendingQueue.offer()만 하고 즉시 반환 → MetricsCollector drain thread 블로킹 없음
+      - 모든 I/O는 writerThread에서만 처리 → LocalBuffer 동기화 최소화
+      - 실패한 배치는 개별 라인으로 분해해 LocalBuffer에 보관 → 재배치 가능
+
+  8. [Part C] 동적 플로우 관리 (patch diff → 작업 큐 → 스냅샷 롤백 → 변경 이력)
+     → FlowManager 확장.
+
+  9. [Part F] CLI (flow/node/wire/sensor/stats/monitor 전체 명령어)
+
+  10. [Part G] 통합 시나리오
+
+  11. [Part H] 분산 다중 엔진 (선택)
+
+  이유: Connection 추상화가 나머지 모든 것의 기반 → FlowManager가 그 위에서 노드를 조립 → 메트릭은 FlowManager 동작 이후에 의미 있음 → InfluxDB는 메트릭 이후
+  → 동적 관리/CLI는 최종 마무리.
+
+  ---
+
+  9. [Part F] CLI (flow/node/wire/sensor/stats/monitor 전체 명령어)
+
+  10. [Part G] 통합 시나리오
+
+  11. [Part H] 분산 다중 엔진 (선택)
+
+  이유: Connection 추상화가 나머지 모든 것의 기반 → FlowManager가 그 위에서 노드를 조립 → 메트릭은 FlowManager 동작 이후에 의미 있음 → InfluxDB는 메트릭 이후
+  → 동적 관리/CLI는 최종 마무리.
+

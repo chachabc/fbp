@@ -1,0 +1,277 @@
+================================================================
+Part A — Connection 추상화 및 MqttBridgeConnection
+================================================================
+
+[ 스펙 요구사항 ]
+
+1. 기존 Connection 클래스를 Connection 인터페이스로 추출
+2. 기존 BlockingQueue 구현을 LocalConnection으로 분리
+3. MQTT 기반 MqttBridgeConnection 구현
+4. 노드 코드는 한 줄도 변경하지 않는다
+
+핵심 원칙:
+  노드는 아무것도 모른다. 노드는 여전히 InputPort에서 메시지를
+  받고 OutputPort로 메시지를 보낸다. 그 메시지가 BlockingQueue를
+  통해 전달되는지, MQTT 브로커를 경유하는지 노드는 알지 못한다.
+
+----------------------------------------------------------------
+[ 구현 접근법 ]
+
+기존 stage1/stage2 의 Connection 클래스(BlockingQueue 기반)를
+인터페이스로 추출하고, 두 가지 구현체를 만들었다.
+
+  LocalConnection    — 기존 동작 유지 (JVM 내 BlockingQueue)
+  MqttBridgeConnection — 시스템 브로커를 경유하는 MQTT 기반
+
+Strategy 패턴을 적용하여 노드는 Connection 인터페이스만 알고,
+FlowManager가 플로우 정의의 transport 섹션을 보고 구현체를 선택한다.
+
+----------------------------------------------------------------
+[ 구현 코드 ]
+
+== Connection.java (인터페이스) ==
+package com.fbp.engine.core.stage_3_p;
+
+public interface Connection {
+    /**
+     * 메시지를 채널에 전달한다.
+     * 구현에 따라 큐에 적재하거나 MQTT로 발행한다.
+     */
+    void deliver(Message message);
+
+    /**
+     * 채널에서 메시지를 꺼낸다. 메시지가 없으면 도착할 때까지 블로킹한다.
+     */
+    Message poll() throws InterruptedException;
+
+    int getBufferSize();
+    String getId();
+    void close();
+}
+
+----------------------------------------------------------------
+== LocalConnection.java ==
+
+public class LocalConnection implements Connection {
+
+    static final int DEFAULT_CAPACITY = 100;
+
+    private final String id;
+    private final LinkedBlockingQueue<Message> buffer;
+    private final MetricsCollector collector;  // nullable
+    private final String flowId;               // nullable
+
+    public LocalConnection(String id) {
+        this(id, DEFAULT_CAPACITY, null, null);
+    }
+
+    @Override
+    public void deliver(Message message) {
+        if (collector != null) {
+            collector.record(new WireMetricEvent(flowId, id, 0L, buffer.size(), false, message));
+        }
+        try {
+            buffer.put(message);   // 큐가 찰 때까지 블로킹 → 자연스러운 백프레셔
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    @Override
+    public Message poll() throws InterruptedException {
+        return buffer.take();  // 메시지가 도착할 때까지 블로킹
+    }
+
+    @Override
+    public void close() {
+        buffer.clear();
+    }
+}
+
+----------------------------------------------------------------
+== MessageSerializer.java ==
+
+Message를 MQTT 페이로드(byte[])로 직렬화/역직렬화한다.
+
+봉투(Envelope) 포맷:
+{
+  "v": 1,          // 프로토콜 버전 (향후 하위 호환용)
+  "id": "uuid",    // Message 고유 ID
+  "ts": 1234567890,// 원본 타임스탬프
+  "payload": {...} // Message.getPayload()
+}
+
+public class MessageSerializer {
+    private static final int VERSION = 1;
+    private final ObjectMapper mapper = new ObjectMapper();
+
+    public byte[] serialize(Message message) {
+        Map<String, Object> envelope = new HashMap<>();
+        envelope.put("v", VERSION);
+        envelope.put("id", message.getId());
+        envelope.put("ts", message.getTimestamp());
+        envelope.put("payload", message.getPayload());
+        return mapper.writeValueAsBytes(envelope);
+    }
+
+    public Message deserialize(byte[] data) {
+        Map<String, Object> envelope = mapper.readValue(data, MAP_TYPE);
+        String id = (String) envelope.get("id");
+        long ts = ((Number) envelope.get("ts")).longValue();
+        Map<String, Object> payload = (Map<String, Object>) envelope.get("payload");
+        return new Message(id, payload, ts);
+    }
+}
+
+----------------------------------------------------------------
+== MqttBridgeConnection.java ==
+
+설계 결정:
+- pub 클라이언트와 sub 클라이언트를 분리한다.
+  이유: 하나의 MqttClient로 pub+sub을 함께 하면 deliver()가 자기
+  자신이 발행한 메시지를 콜백으로 다시 받아 루프가 생긴다.
+  pub/sub 클라이언트 ID를 달리 하면 브로커가 둘을 독립 세션으로 처리.
+- QoS 1을 기본값으로 사용 (최소 1회 전달 보장)
+- 내부 버퍼(LinkedBlockingQueue) 200개 — 브로커 지연을 흡수
+- setAutomaticReconnect(true) — 브로커 재연결 자동화
+- setKeepAliveInterval(300) — 5분 유휴 와이어의 빈번한 타임아웃 방지
+
+토픽 네이밍 규칙:
+  fbp/{flowId}/{srcNodeId}.{srcPort}-{dstNodeId}.{dstPort}
+  예: fbp/temperature-monitoring/sensor.out-rule.in
+
+public class MqttBridgeConnection implements Connection {
+
+    private final String id;
+    private final String topic;
+    private final int qos;
+    private final MessageSerializer serializer;
+    private final LinkedBlockingQueue<Message> internalQueue;
+    private final MetricsCollector collector;
+    private final String flowId;
+    private final MqttClient publisher;
+    private final MqttClient subscriber;
+
+    MqttBridgeConnection(String id, String brokerUrl, String topic, int qos,
+                         int internalCapacity, MetricsCollector collector, String flowId)
+            throws MqttException {
+        this.id            = id;
+        this.topic         = topic;
+        this.qos           = qos;
+        this.collector     = collector;
+        this.flowId        = flowId;
+        this.serializer    = new MessageSerializer();
+        this.internalQueue = new LinkedBlockingQueue<>(internalCapacity);
+
+        // pub/sub 클라이언트 ID를 달리함으로써 브로커가 독립 세션으로 처리
+        this.publisher  = new MqttClient(brokerUrl, "fbp-pub-" + id, new MemoryPersistence());
+        this.subscriber = new MqttClient(brokerUrl, "fbp-sub-" + id, new MemoryPersistence());
+
+        connectClients();
+    }
+
+    private void connectClients() throws MqttException {
+        MqttConnectionOptions options = new MqttConnectionOptions();
+        options.setCleanStart(true);
+        options.setAutomaticReconnect(true);
+        options.setKeepAliveInterval(300);  // 비활성 와이어 타임아웃 방지
+
+        publisher.connect(options);
+
+        subscriber.setCallback(new MqttCallback() {
+            @Override
+            public void messageArrived(String t, MqttMessage mqttMsg) {
+                try {
+                    Message message = serializer.deserialize(mqttMsg.getPayload());
+                    boolean dropped = !internalQueue.offer(message);
+                    if (dropped) {
+                        log.warn("[{}] 내부 큐 가득 참 — 메시지 드롭: {}", id, message.getId());
+                    }
+                    if (collector != null) {
+                        collector.record(new WireMetricEvent(
+                                flowId, id, mqttMsg.getPayload().length,
+                                internalQueue.size(), dropped, dropped ? null : message));
+                    }
+                } catch (Exception e) {
+                    log.error("[{}] 수신 메시지 역직렬화 실패: {}", id, e.getMessage());
+                }
+            }
+
+            @Override
+            public void connectComplete(boolean reconnect, String uri) {
+                if (reconnect) {
+                    try {
+                        subscriber.subscribe(topic, qos);  // 재연결 후 자동 재구독
+                    } catch (MqttException e) {
+                        log.error("[{}] 재구독 실패: {}", id, e.getMessage());
+                    }
+                }
+            }
+            // disconnected, mqttErrorOccurred, deliveryComplete, authPacketArrived ...
+        });
+
+        subscriber.connect(options);
+        subscriber.subscribe(topic, qos);
+    }
+
+    @Override
+    public void deliver(Message message) {
+        try {
+            byte[] payload = serializer.serialize(message);
+            MqttMessage mqttMsg = new MqttMessage(payload);
+            mqttMsg.setQos(qos);
+            publisher.publish(topic, mqttMsg);
+            if (collector != null) {
+                collector.record(new WireMetricEvent(
+                        flowId, id, payload.length, internalQueue.size(), false, message));
+            }
+        } catch (MqttException e) {
+            log.error("[{}] 발행 실패: {}", id, e.getMessage());
+        }
+    }
+
+    @Override
+    public Message poll() throws InterruptedException {
+        return internalQueue.take();  // subscriber 콜백이 넣어둔 메시지를 꺼냄
+    }
+
+    @Override
+    public void close() {
+        // subscriber 구독 해지 → disconnect → close
+        // publisher disconnect → close
+        // internalQueue.clear()
+    }
+}
+
+----------------------------------------------------------------
+[ 설계 결정 근거 ]
+
+Q. pub/sub 클라이언트를 분리한 이유?
+A. 동일 클라이언트로 pub+sub 시 자신이 발행한 메시지를 자신이 수신하는
+   루프가 발생한다. 클라이언트 ID를 달리 하여 브로커가 독립 세션으로 처리.
+
+Q. 직렬화 포맷으로 JSON을 선택한 이유?
+A. 범용성과 디버깅 편의성을 우선. 성능이 임계적이면 MessagePack으로
+   교체 가능하도록 MessageSerializer를 별도 클래스로 분리.
+
+Q. 토픽명에 특수문자(→) 대신 '-'를 쓴 이유?
+A. MQTT 사양에서 '+' 와 '#'는 와일드카드이므로 사용 불가.
+   '→'는 일부 브로커에서 허용하지 않을 수 있어 '-'로 대체.
+
+Q. keepAliveInterval을 300(5분)으로 설정한 이유?
+A. 기본값 60초에서 유휴 와이어(메시지 없는 연결)가 빈번하게
+   "Timed out as no activity" 오류로 끊어지는 현상 발생.
+   데이터 흐름이 간헐적인 IoT 환경에서는 더 긴 keepAlive가 필요.
+
+Q. MqttBridgeConnection마다 클라이언트 2개 — 연결 수 폭발 문제?
+A. 현재 구현은 단순성을 우선. 연결 수가 문제가 되면 MqttClientPool로
+   공유 클라이언트를 유지하는 방식으로 확장 가능.
+   (spec 설계 참고: getPublisher/getSubscriber + 참조 카운트)
+
+----------------------------------------------------------------
+[ 테스트 ]
+
+- LocalConnectionTest: 기존 BlockingQueue 동작 검증
+- MessageSerializerTest: 직렬화/역직렬화 왕복 검증
+- MqttBridgeConnectionTest: 실제 브로커 연동 통합 테스트
+- FlowManagerTest: LocalConnection 기반 플로우 동작 검증

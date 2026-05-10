@@ -23,6 +23,14 @@ public interface OutputPort {
     void connect(Connection connection);
 
     /**
+     * 지정한 id의 Connection을 포트에서 제거한다.
+     * 해당 id가 없으면 아무것도 하지 않는다.
+     *
+     * @param connectionId 제거할 Connection의 id
+     */
+    void disconnect(String connectionId);
+
+    /**
      * 연결된 모든 Connection으로 메시지를 전송한다.
      * Connection이 없으면 메시지는 무시된다.
      *

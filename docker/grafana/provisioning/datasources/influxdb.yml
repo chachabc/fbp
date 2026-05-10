@@ -1,0 +1,16 @@
+apiVersion: 1
+
+datasources:
+  - name: InfluxDB-FBP
+    uid: influxdb-fbp
+    type: influxdb
+    access: proxy
+    url: http://influxdb:8086
+    jsonData:
+      version: Flux
+      organization: fbp
+      defaultBucket: fbp-metrics
+    secureJsonData:
+      token: fbp-admin-token-please-change
+    isDefault: true
+    editable: true

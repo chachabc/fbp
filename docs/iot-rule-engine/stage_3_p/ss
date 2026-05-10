@@ -1,0 +1,41 @@
+FBP Engine CLI 명령어
+─────────────────────────────────────────────────────────────────
+flow list                               플로우 목록
+flow deploy <file>                      JSON 파일에서 배포
+flow start|stop|restart|remove <id>     생명주기 관리
+flow status <id>                        상세 상태
+flow patch <id> <file>                  동적 패치
+flow add-node <id> <spec>               노드 추가 (파일 또는 인라인 JSON)
+flow remove-node <id> <node-id>         노드 제거
+flow add-wire <id> <from> <to>          연결 추가 (ex: src:out sink:in)
+flow remove-wire <id> <wire-id>         연결 제거
+flow update-config <id> <node-id> <cfg> 노드 설정 변경
+flow history <id>                       변경 이력 조회
+flow rollback <id> <revision>           특정 revision으로 롤백
+─────────────────────────────────────────────────────────────────
+node list <flow-id>                     노드 목록
+node info <flow-id> <node-id>           노드 상세
+node stats <flow-id> <node-id>          노드 통계
+─────────────────────────────────────────────────────────────────
+wire list <flow-id>                     연결 목록
+wire info <flow-id> <wire-id>           연결 상세
+wire stats <flow-id> <wire-id>          연결 통계
+─────────────────────────────────────────────────────────────────
+monitor flow <flow-id>                  플로우 실시간 모니터링 (Enter로 중단)
+monitor node <flow-id> <node-id>        노드 실시간 모니터링 (Enter로 중단)
+─────────────────────────────────────────────────────────────────
+sensor list                             등록된 도메인 메트릭 목록
+sensor stats <name> --window <1m|1h|1d> [--range <Nh|Nd>]
+─────────────────────────────────────────────────────────────────
+stats                                   엔진 전체 통계
+broker status                           MQTT 브로커 연결 상태
+influx status                           InfluxDB 연동 상태
+help                                    이 도움말
+exit                                    종료
+
+
+
+mvn compile exec:java -Dexec.mainClass="com.fbp.engine.runner.Main"
+
+flow deploy flows/health-check.json
+flow deploy flows/smart-building.json

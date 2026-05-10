@@ -1,0 +1,53 @@
+{
+  "id": "smart-building",
+  "transport": {
+    "type": "mqtt",
+    "broker": "tcp://localhost:1884",
+    "qos": 1
+  },
+  "metrics": {
+    "domain": [
+      {
+        "name": "temperature",
+        "source": { "node": "temp-sensor", "port": "out" },
+        "field": "value",
+        "windows": ["1m", "1h", "1d"]
+      }
+    ]
+  },
+  "nodes": [
+    {
+      "id": "temp-sensor",
+      "type": "MqttSubscriberNode",
+      "config": {
+        "brokerUrl": "tcp://localhost:1883",
+        "clientId":  "fbp-temp-subscriber",
+        "topic":     "sensor/temp",
+        "qos":       1
+      }
+    },
+    {
+      "id": "temp-rule",
+      "type": "ThresholdFilterNode",
+      "config": {
+        "fieldName": "value",
+        "threshold": 30.0
+      }
+    },
+    {
+      "id": "alert",
+      "type": "AlertNode",
+      "config": {}
+    },
+    {
+      "id": "normal-log",
+      "type": "LogNode",
+      "config": {}
+    }
+  ],
+  "connections": [
+    { "from": "temp-sensor:out", "to": "temp-rule:in"   },
+    { "from": "temp-rule:alert", "to": "alert:in"       },
+    { "from": "temp-rule:normal","to": "normal-log:in"  }
+  ]
+}

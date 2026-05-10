@@ -1,0 +1,82 @@
+services:
+  # 데이터 브로커: IoT 센서 데이터 수집용 (MqttSubscriberNode, MqttPublisherNode 연결)
+  mqtt-data-broker:
+    image: eclipse-mosquitto:2.0
+    container_name: fbp-data-broker
+    ports:
+      - "1883:1883"
+    volumes:
+      - ./mosquitto-data/mosquitto.conf:/mosquitto/config/mosquitto.conf
+      - mqtt-data-data:/mosquitto/data
+      - mqtt-data-log:/mosquitto/log
+    restart: unless-stopped
+    networks:
+      - fbp-network
+
+  # 시스템 브로커: FBP 엔진 내부 노드 간 메시지 전달용 (MqttBridgeConnection 사용)
+  mqtt-system-broker:
+    image: eclipse-mosquitto:2.0
+    container_name: fbp-system-broker
+    ports:
+      - "1884:1883"
+    volumes:
+      - ./mosquitto-system/mosquitto.conf:/mosquitto/config/mosquitto.conf
+      - mqtt-system-data:/mosquitto/data
+      - mqtt-system-log:/mosquitto/log
+    restart: unless-stopped
+    networks:
+      - fbp-network
+
+  # InfluxDB: 시계열 메트릭/도메인 통계 저장
+  influxdb:
+    image: influxdb:2.7
+    container_name: fbp-influxdb
+    ports:
+      - "8086:8086"
+    environment:
+      DOCKER_INFLUXDB_INIT_MODE: setup
+      DOCKER_INFLUXDB_INIT_USERNAME: admin
+      DOCKER_INFLUXDB_INIT_PASSWORD: admin12345
+      DOCKER_INFLUXDB_INIT_ORG: fbp
+      DOCKER_INFLUXDB_INIT_BUCKET: fbp-metrics
+      DOCKER_INFLUXDB_INIT_RETENTION: 30d
+      DOCKER_INFLUXDB_INIT_ADMIN_TOKEN: fbp-admin-token-please-change
+    volumes:
+      - influxdb-data:/var/lib/influxdb2
+      - influxdb-config:/etc/influxdb2
+    restart: unless-stopped
+    networks:
+      - fbp-network
+
+  # Grafana: InfluxDB 시계열 데이터 시각화
+  grafana:
+    image: grafana/grafana:10.4.0
+    container_name: fbp-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning
+      - ./grafana/dashboards:/var/lib/grafana/dashboards
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      - influxdb
+    restart: unless-stopped
+    networks:
+      - fbp-network
+
+volumes:
+  mqtt-data-data:
+  mqtt-data-log:
+  mqtt-system-data:
+  mqtt-system-log:
+  influxdb-data:
+  influxdb-config:
+  grafana-data:
+
+networks:
+  fbp-network:
+    driver: bridge
